@@ -1,0 +1,33 @@
+# Environments & Virtual Environments
+backend/venv/
+venv/
+.venv/
+.env
+*.env
+
+# Python Bytecode & Cache
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Storage Directories
+backend/storage/uploads/*
+backend/storage/frames/*
+backend/storage/results/*
+backend/storage/reports/*
+
+# Preserve .gitkeep files in storage
+!backend/storage/uploads/.gitkeep
+!backend/storage/frames/.gitkeep
+!backend/storage/results/.gitkeep
+!backend/storage/reports/.gitkeep
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3

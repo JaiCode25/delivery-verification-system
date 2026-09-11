@@ -1,0 +1,25 @@
+from enum import Enum
+
+
+class Platform(str, Enum):
+    AMAZON = "amazon"
+    FLIPKART = "flipkart"
+    BLINKIT = "blinkit"
+    OTHER = "other"
+
+
+class OrderStatus(str, Enum):
+    PLACED = "placed"
+    SHIPPED = "shipped"
+    OUT_FOR_DELIVERY = "out_for_delivery"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+
+
+class VerificationStatus(str, Enum):
+    VERIFIED = "verified"
+    ORDER_NOT_FOUND = "order_not_found"
+    DETAILS_MISMATCH = "details_mismatch"
+    ALREADY_USED = "already_used"
+    UNREADABLE = "unreadable"
+    MANUAL_REVIEW_REQUIRED = "manual_review_required"
