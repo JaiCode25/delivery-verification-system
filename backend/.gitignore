@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+storage/uploads/*
+storage/frames/*
+storage/results/*
+!storage/uploads/.gitkeep
+!storage/frames/.gitkeep
+!storage/results/.gitkeep
