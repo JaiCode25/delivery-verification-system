@@ -6,11 +6,15 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.config import RESULT_DIR
+from app.config import MAX_OCR_FRAMES, RESULT_DIR
 from app.database.connection import SessionLocal
+from app.schemas.enums import LabelVerificationStatus, VerificationStatus
 from app.services.code_detector import detect_codes
 from app.services.frame_extractor import extract_frame_metadata
+from app.services.label_parser import parse_shipping_label
+from app.services.label_verification_service import cross_check_barcode_and_label
 from app.services.ocr_service import extract_text
+from app.services.order_service import find_order_by_barcode, get_order_by_order_id
 from app.services.verification_engine import verify_detected_codes
 
 
@@ -27,24 +31,20 @@ def analyze_media(
     """Execute end-to-end analysis on uploaded image or video.
 
     Extracts frames with timestamps and sharpness scoring, retains the sharpest
-    frame for duplicate barcodes, runs OCR, and cross-verifies against SQLite orders.
+    frame for duplicate barcodes, executes structured label OCR, and performs a
+    two-factor cross-check comparing barcode and shipping-label evidence.
     """
     analysis_id = uuid4().hex
     frames_meta = extract_frame_metadata(media_path, media_type, analysis_id)
 
-    # Keyed by (code_type, code_text)
+    # 1. Barcode / QR detection with sharpness-based selection for duplicates
     codes_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
-    text_by_value: Dict[str, Dict[str, Any]] = {}
-
     for frame in frames_meta:
         frame_name = frame.path.name if media_type == "video" else original_name
-
-        # 1. Barcode / QR detection with sharpness-based selection for duplicates
         detected = detect_codes(frame.path)
         for code in detected:
             key = (code["type"], code["text"])
             existing = codes_by_key.get(key)
-            # Retain the detection from the frame with the highest sharpness score
             if existing is None or frame.sharpness > existing.get("sharpness", -1.0):
                 detection_entry = {
                     "type": code["type"],
@@ -57,8 +57,40 @@ def analyze_media(
                     detection_entry["position"] = code["position"]
                 codes_by_key[key] = detection_entry
 
-        # 2. OCR text extraction with highest-confidence retention
+    detected_codes_list = list(codes_by_key.values())
+
+    # 2. Select frames for OCR (enforcing MAX_OCR_FRAMES limit on long videos)
+    if len(frames_meta) <= MAX_OCR_FRAMES:
+        ocr_frames = frames_meta
+    else:
+        frames_with_codes = {c["first_seen_in"] for c in codes_by_key.values()}
+
+        def frame_priority(f):
+            fn = f.path.name if media_type == "video" else original_name
+            has_code = 1 if fn in frames_with_codes else 0
+            return (has_code, f.sharpness)
+
+        ocr_frames = sorted(frames_meta, key=frame_priority, reverse=True)[:MAX_OCR_FRAMES]
+
+    # 3. OCR text extraction on selected frames
+    raw_ocr_detections: List[Dict[str, Any]] = []
+    text_by_value: Dict[str, Dict[str, Any]] = {}
+
+    for frame in ocr_frames:
+        frame_name = frame.path.name if media_type == "video" else original_name
         for item in extract_text(frame.path):
+            annotated_item = {
+                "text": item["text"],
+                "confidence": item["confidence"],
+                "source_frame": frame_name,
+                "video_timestamp_seconds": frame.timestamp_seconds,
+                "sharpness": frame.sharpness,
+            }
+            if "bounding_box" in item:
+                annotated_item["bounding_box"] = item["bounding_box"]
+
+            raw_ocr_detections.append(annotated_item)
+
             key = item["text"].casefold()
             current = text_by_value.get(key)
             if current is None or item["confidence"] > current["confidence"]:
@@ -69,9 +101,21 @@ def analyze_media(
                     "video_timestamp_seconds": frame.timestamp_seconds,
                 }
 
-    detected_codes_list = list(codes_by_key.values())
+    # 4. Shipping Label Parsing & Multi-Frame Consensus
+    frames_info = [
+        {
+            "frame_name": f.path.name if media_type == "video" else original_name,
+            "timestamp_seconds": f.timestamp_seconds,
+            "sharpness": f.sharpness,
+        }
+        for f in ocr_frames
+    ]
+    parsed_label = parse_shipping_label(
+        detections=raw_ocr_detections,
+        frames_metadata=frames_info,
+    )
 
-    # 3. Barcode-to-Order Verification
+    # 5. Barcode Verification and Label Cross-Check
     own_session = False
     session = db
     if session is None:
@@ -87,7 +131,35 @@ def analyze_media(
             expected_customer_name=expected_customer_name,
             expected_product_name=expected_product_name,
         )
+
+        matched_order_obj = None
+        if verification_res.matched_order:
+            matched_order_obj = get_order_by_order_id(session, verification_res.matched_order.order_id)
+            if not matched_order_obj:
+                matched_order_obj = find_order_by_barcode(session, verification_res.matched_order.barcode_value)
+
+        # Cross-check barcode verification with structured shipping label
+        label_analysis_res = cross_check_barcode_and_label(
+            db=session,
+            parsed_label=parsed_label,
+            barcode_result=verification_res,
+            matched_order=matched_order_obj,
+            expected_platform=expected_platform,
+            expected_order_id=expected_order_id,
+            expected_customer_name=expected_customer_name,
+            expected_product_name=expected_product_name,
+        )
+
+        # Cross-check alert: if barcode matched but physical label contradicts it
+        if matched_order_obj and label_analysis_res.status == LabelVerificationStatus.MISMATCH:
+            if verification_res.verification_status == VerificationStatus.VERIFIED:
+                verification_res.verification_status = VerificationStatus.DETAILS_MISMATCH
+                verification_res.mismatch_reasons.append(
+                    "Cross-check alert: Shipping label text contradicts the barcode-matched order record."
+                )
+
         verification_dict = verification_res.model_dump(mode="json")
+        label_analysis_dict = label_analysis_res.model_dump(mode="json")
     finally:
         if own_session and session:
             session.close()
@@ -102,6 +174,7 @@ def analyze_media(
         "codes": detected_codes_list,
         "detected_text": list(text_by_value.values()),
         "order_verification": verification_dict,
+        "label_analysis": label_analysis_dict,
     }
 
     # Persist JSON report

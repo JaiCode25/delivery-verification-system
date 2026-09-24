@@ -23,3 +23,18 @@ class VerificationStatus(str, Enum):
     ALREADY_USED = "already_used"
     UNREADABLE = "unreadable"
     MANUAL_REVIEW_REQUIRED = "manual_review_required"
+
+
+class FieldComparisonStatus(str, Enum):
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    NOT_DETECTED = "not_detected"
+    UNCERTAIN = "uncertain"
+
+
+class LabelVerificationStatus(str, Enum):
+    VERIFIED = "verified"
+    PARTIALLY_VERIFIED = "partially_verified"
+    MISMATCH = "mismatch"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    MANUAL_REVIEW_REQUIRED = "manual_review_required"

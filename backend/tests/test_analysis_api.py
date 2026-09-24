@@ -86,3 +86,10 @@ def test_analyze_image_with_barcode(client, seeded_db):
     assert ov["verification_status"] == "verified"
     assert ov["matched_order"]["order_id"] == "DEMO-OD-FLIPKART-88214"
     assert ov["decoded_value"] == "FMPC6414359435"
+
+    # Verify structured label analysis integration
+    assert "label_analysis" in data
+    la = data["label_analysis"]
+    assert "status" in la
+    assert "parsed_fields" in la
+    assert "field_comparisons" in la

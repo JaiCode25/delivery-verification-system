@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     result_dir: Path = BASE_DIR / "storage" / "results"
     report_dir: Path = BASE_DIR / "storage" / "reports"
     max_file_size: int = 200 * 1024 * 1024  # 200 MB
+    max_ocr_frames: int = 10  # Maximum video frames to process with OCR
     allowed_image_extensions: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     allowed_video_extensions: Set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
     cors_origins: List[str] = [
@@ -43,6 +44,7 @@ REPORT_DIR = settings.report_dir
 ALLOWED_IMAGE_EXTENSIONS = settings.allowed_image_extensions
 ALLOWED_VIDEO_EXTENSIONS = settings.allowed_video_extensions
 MAX_FILE_SIZE = settings.max_file_size
+MAX_OCR_FRAMES = settings.max_ocr_frames
 
 # Ensure storage directories exist
 for directory in (UPLOAD_DIR, FRAME_DIR, RESULT_DIR, REPORT_DIR):
