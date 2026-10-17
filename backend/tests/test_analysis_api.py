@@ -93,3 +93,17 @@ def test_analyze_image_with_barcode(client, seeded_db):
     assert "status" in la
     assert "parsed_fields" in la
     assert "field_comparisons" in la
+
+    # Verify session persisted analysis metadata
+    session_id = ov["verification_session_id"]
+    assert session_id is not None
+
+    # Generate Report from this session
+    report_res = client.post(f"/api/reports/generate/{session_id}")
+    assert report_res.status_code == 201
+    report = report_res.json()
+    assert report["analysis_id"] == data["analysis_id"]
+    assert report["input_type"] == "image"
+    assert report["original_filename"] == "test_label.png"
+    assert report["label_summary"] is not None
+    assert report["label_summary"]["platform"] is None or report["label_summary"]["platform"] == "flipkart"

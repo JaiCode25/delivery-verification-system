@@ -1,11 +1,18 @@
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.schemas.order import OrderCreate, OrderListResponse, OrderRead
-from app.services import order_service
+from app.schemas.order import (
+    OrderCreate,
+    OrderListResponse,
+    OrderRead,
+    ProductReferenceListResponse,
+    ProductReferenceRead,
+)
+from app.services import order_service, reference_service
+
 
 router = APIRouter(prefix="/api/orders", tags=["Orders"])
 
@@ -64,3 +71,60 @@ def get_order_by_barcode(barcode_value: str, db: Session = Depends(get_db)):
             detail=f"Order with barcode value '{barcode_value}' not found.",
         )
     return order
+
+
+@router.post("/{order_id}/references", response_model=ProductReferenceListResponse, status_code=status.HTTP_201_CREATED)
+async def upload_order_references(
+    order_id: str,
+    files: list[UploadFile] = File(...),
+    product_name: Optional[str] = Form(None),
+    brand: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
+    colour: Optional[str] = Form(None),
+    product_url: Optional[str] = Form(None),
+    expected_quantity: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Upload 1-5 product reference images for an order item."""
+    created = await reference_service.add_order_references(
+        db=db,
+        order_id=order_id,
+        files=files,
+        product_name=product_name,
+        brand=brand,
+        model=model,
+        colour=colour,
+        product_url=product_url,
+        expected_quantity=expected_quantity,
+    )
+    all_refs = reference_service.list_order_references(db, order_id)
+    return ProductReferenceListResponse(
+        order_id=order_id,
+        total_references=len(all_refs),
+        references=[ProductReferenceRead.model_validate(r) for r in all_refs],
+    )
+
+
+@router.get("/{order_id}/references", response_model=ProductReferenceListResponse)
+def get_order_references(
+    order_id: str,
+    db: Session = Depends(get_db),
+):
+    """List all stored reference images for an order."""
+    refs = reference_service.list_order_references(db, order_id)
+    return ProductReferenceListResponse(
+        order_id=order_id,
+        total_references=len(refs),
+        references=[ProductReferenceRead.model_validate(r) for r in refs],
+    )
+
+
+@router.delete("/{order_id}/references/{reference_id}", status_code=status.HTTP_200_OK)
+def delete_reference(
+    order_id: str,
+    reference_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a specific reference image for an order."""
+    reference_service.delete_order_reference(db, order_id, reference_id)
+    return {"message": f"Reference image '{reference_id}' deleted successfully for order '{order_id}'."}

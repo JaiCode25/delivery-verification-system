@@ -69,6 +69,27 @@ DEMO_ORDERS = [
             }
         ],
     },
+    {
+        "order_id": "OD290920260550001234",
+        "tracking_id": "VGR055-DEMO-2026-01",
+        "barcode_value": "VGR055-DEMO-2026-01",
+        "platform": Platform.FLIPKART.value,
+        "customer_name": "Demo Customer",
+        "customer_email": "demo-vgr@example.com",
+        "delivery_address": "Flat 301, Demonstration Heights, Campus Road, Pune 411037",
+        "order_status": OrderStatus.DELIVERED.value,
+        "delivered_at": datetime(2026, 9, 29, 10, 0, 0, tzinfo=timezone.utc),
+        "items": [
+            {
+                "product_name": "VGR V-055 Professional Hair Trimmer",
+                "brand": "VGR",
+                "model": "V-055",
+                "colour": "Black/Blue",
+                "expected_quantity": 1,
+                "product_url": "https://www.flipkart.com/demo/vgr-v055",
+            }
+        ],
+    },
 ]
 
 
@@ -82,7 +103,10 @@ def seed_demonstration_orders(session: Session = None) -> list[str]:
 
     inserted_order_ids: list[str] = []
     try:
-        init_db()
+        if session is not None:
+            init_db(target_engine=session.get_bind())
+        else:
+            init_db()
         for data in DEMO_ORDERS:
             existing = db.query(Order).filter(Order.order_id == data["order_id"]).first()
             if existing is None:

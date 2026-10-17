@@ -2,7 +2,9 @@ from app.schemas.enums import (
     FieldComparisonStatus,
     LabelVerificationStatus,
     OrderStatus,
+    OverallVerificationDecision,
     Platform,
+    ProductMatchDecision,
     VerificationStatus,
 )
 from app.schemas.label import (
@@ -10,6 +12,7 @@ from app.schemas.label import (
     BoundingBoxPoint,
     FieldComparison,
     LabelAnalysisResult,
+    LabelSummary,
     LabelVerificationRequest,
     OcrDetection,
     ParsedField,
@@ -24,6 +27,17 @@ from app.schemas.order import (
     OrderListResponse,
     OrderRead,
     OrderSummary,
+    ProductReferenceListResponse,
+    ProductReferenceRead,
+)
+from app.schemas.product_matching import (
+    ProductCandidateFrame,
+    ProductMatchingComponentScores,
+    ProductMatchingResult,
+)
+from app.schemas.report import (
+    VerificationReportRead,
+    VerificationReportSummary,
 )
 from app.schemas.verification import (
     BarcodeVerificationRequest,
@@ -37,9 +51,13 @@ __all__ = [
     "VerificationStatus",
     "FieldComparisonStatus",
     "LabelVerificationStatus",
+    "ProductMatchDecision",
+    "OverallVerificationDecision",
     "OrderItemBase",
     "OrderItemCreate",
     "OrderItemRead",
+    "ProductReferenceRead",
+    "ProductReferenceListResponse",
     "OrderBase",
     "OrderCreate",
     "OrderRead",
@@ -55,5 +73,11 @@ __all__ = [
     "ParsedShippingLabel",
     "FieldComparison",
     "LabelAnalysisResult",
+    "LabelSummary",
     "LabelVerificationRequest",
+    "ProductMatchingComponentScores",
+    "ProductCandidateFrame",
+    "ProductMatchingResult",
+    "VerificationReportSummary",
+    "VerificationReportRead",
 ]

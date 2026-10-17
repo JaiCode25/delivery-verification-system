@@ -1,214 +1,182 @@
 # Delivery Verification and Automated Complaint System — Backend
 
-This FastAPI backend serves as the core intelligence and verification engine for the Delivery Verification and Automated Complaint System. It accepts package images and unboxing videos, extracts frames with timecodes and sharpness scoring, detects barcodes/QR codes, reads label text via OCR, extracts structured shipping-label metadata, and cross-references identifiers against an authoritative order database to authenticate deliveries and prevent fraudulent claims.
+Quantity verification and visible-condition analysis are documented in
+[the backend evidence guide](docs/quantity-condition.md), including model provenance,
+offline defaults, APIs, report decisions, limitations and Swagger retest steps.
+The current report rules in that guide extend the earlier Phase 3 summary below.
+
+This FastAPI backend serves as the core intelligence and verification engine for the Delivery Verification and Automated Complaint System. It accepts package images and unboxing videos, extracts frames with timecodes and sharpness scoring, detects barcodes/QR codes, reads label text via OCR, extracts structured shipping-label metadata, executes hybrid visual product matching against stored reference images, and generates structured verification reports in JSON and responsive HTML to authenticate deliveries and prevent fraudulent claims.
+
+> **Important System Note:**
+> “This prototype uses explainable image-similarity methods and optional pretrained embeddings. It does not use a custom-trained product or damage-detection model.”
 
 ---
 
-## 1. Architecture Summary
+## 1. Architecture & Capabilities Summary
 
 The backend is built in Python 3.11 with FastAPI and SQLAlchemy (SQLite):
 
 * **API Layer (`app/api/`):**
-  * `analysis.py`: Endpoints to upload unboxing media, extract frames, run computer vision, and trigger two-factor automated verification.
-  * `orders.py`: CRUD and query endpoints for registered customer orders and tracking numbers.
+  * `analysis.py`: Endpoints to upload unboxing media, extract frames, run computer vision, and trigger automated verification.
+  * `orders.py`: CRUD endpoints for registered customer orders, tracking numbers, and product reference image management (`POST /api/orders/{order_id}/references`, `GET /api/orders/{order_id}/references`, `DELETE /api/orders/{order_id}/references/{reference_id}`).
+  * `product_matching.py`: Visual matching endpoint (`POST /api/product-matching/analyze`) comparing delivered product images/videos against stored reference images.
+  * `reports.py`: Report generation endpoints (`POST /api/reports/generate/{session_id}`, `GET /api/reports/{report_id}`, `GET /api/reports/{report_id}/html`).
   * `verification.py`: Dedicated verification endpoints evaluating barcodes, structured shipping labels, and managing complaint/claim lifecycles.
 * **Service Layer (`app/services/`):**
+  * `reference_service.py`: Secure storage and lifecycle management for order reference images under `storage/references/<order_id>/` (1–5 images per item, MIME validation, path traversal prevention, safe UUIDs).
+  * `image_similarity.py`: Multi-signal explainable similarity algorithms (perceptual hashing via `imagehash`, normalized OpenCV HSV color histograms, OpenCV ORB visual feature matching with Lowe's ratio test, and optional lazy-loaded OpenCLIP adapter).
+  * `frame_selection_service.py`: Intelligent video frame sampler picking sharp, non-duplicate candidate frames using Laplacian variance and pHash deduplication while preserving video timestamps.
+  * `product_matching_service.py`: Hybrid product matching engine combining brand/model OCR token similarity and visual multi-signal matching.
+  * `report_service.py`: Report synthesis engine formulating explainable verdicts (`verified`, `likely_verified`, `mismatch`, `manual_review_required`), masking customer PII, persisting JSON data, and rendering responsive HTML.
   * `file_handler.py`: Chunked streaming upload handler enforcing size limits and validating image/video magic bytes.
   * `frame_extractor.py`: OpenCV video frame sampler extracting 1 fps with timestamps and Laplacian variance sharpness metrics.
   * `code_detector.py`: Ultra-fast C++ barcode/QR scanner (`zxing-cpp`) capturing symbology and bounding coordinates.
   * `ocr_service.py`: Deep-learning text recognizer (`easyocr`) returning text, confidence, and bounding boxes.
-  * `label_parser.py`: Regex and heuristic parser extracting structured shipping label fields with multi-frame consensus.
+  * `label_parser.py`: Regex and heuristic parser extracting structured shipping label fields with multi-frame consensus and contextual Flipkart Order ID normalization.
   * `label_verification_service.py`: Compares label fields against orders and executes two-source barcode-label cross-checks.
   * `order_service.py`: Database query abstractions, detail comparison logic, and claim state tracking.
-  * `verification_engine.py`: Multi-factor authenticity decision engine producing 6 standardized verification outcomes.
+  * `verification_engine.py`: Multi-factor authenticity decision engine producing standardized verification outcomes.
 * **Data Layer (`app/database/`):**
-  * `models.py`: SQLAlchemy models (`Order`, `OrderItem`, `VerificationSession`).
-  * `connection.py`: Engine, connection pool, and session generator.
+  * `models.py`: SQLAlchemy models (`Order`, `OrderItem`, `ProductReference`, `VerificationSession`, `ProductMatchingRecord`, `VerificationReport`).
+  * `connection.py`: Engine, connection pool, session generator, and safe SQLite column migration.
   * `seed.py`: Idempotent demonstration data seeder.
 * **Storage (`storage/`):**
   * `uploads/`: Temporary uploaded media.
+  * `references/`: Reference product photographs stored securely per order ID.
   * `frames/`: Extracted video frames per analysis session.
   * `results/`: Output JSON analysis reports.
-  * `reports/`: Generated PDF verification reports (future phase).
+  * `reports/`: Generated structured JSON reports and standalone responsive HTML reports.
 
 ---
 
-## 2. Why Barcode Scanning Alone Does Not Prove Authenticity
+## 2. Phase 3: Product Matching & Verification Reports
 
-Simply decoding a barcode or QR code does not guarantee that a delivery is legitimate or that a customer's claim is valid:
-* **Counterfeit Labels:** Anyone can print a generic barcode or copy an old tracking number onto an empty box.
-* **Mismatched Shipments:** A delivery may belong to a completely different customer, address, or product than what is being claimed.
-* **Repeated Claim Fraud:** The same valid shipping label could be photographed multiple times or used across separate complaint claims.
-* **Cancelled / Returned Orders:** The label might match an order that was previously cancelled or marked undeliverable.
+### A. Product Reference Management
+* **Storage Path:** `backend/storage/references/<order_id>/`
+* **Security:** Server-side UUID filenames, path traversal prevention, magic byte verification (JPEG, PNG, WEBP), configurable size limit (10 MB per image).
+* **Limits:** 1–5 reference images per order item.
+* **Privacy:** Relative paths stored in SQLite; absolute Windows filesystem paths are never leaked in API responses.
 
-For this reason, the system treats **barcodes** and **shipping-label text** as two independent evidence sources, verifying values against an authoritative order database, checking customer and product consistency, and tracking prior claim finalizations.
+### B. Hybrid Product Matching Engine
+The system uses an explainable multi-signal visual and textual matching approach:
+1. **OCR Text Similarity (Weight: 0.35):** Tokenized brand, model, and product name matching against candidate OCR detections.
+2. **ORB Visual Feature Matching (Weight: 0.30):** OpenCV ORB keypoint detection and BFMatcher with Lowe's ratio test (0.75).
+3. **Perceptual Image Hash (Weight: 0.20):** Combined pHash and dHash Hamming distance calculation via `imagehash`.
+4. **HSV Colour Histogram (Weight: 0.15):** Normalized 2D Hue-Saturation histogram correlation.
+5. **Optional OpenCLIP Adapter:** Disabled by default (`enable_openclip: False`), lazy-loaded, with graceful fallback.
 
-> **Note on College Prototype:** Because commercial production APIs from Amazon, Flipkart, and Blinkit are closed and proprietary, this college prototype uses a persistent SQLite database pre-seeded with representative demonstration orders to simulate real-world e-commerce verification.
+#### Score Normalization & Decisions:
+* **All component scores and overall score** are normalized to the range `0.0 – 1.0`.
+* **Decision Thresholds:**
+  * `overall_score >= 0.75`: `match`
+  * `0.55 <= overall_score < 0.75`: `likely_match`
+  * `overall_score < 0.55`: `mismatch`
+  * `insufficient evidence (no references/unusable frames)`: `insufficient_evidence`
+* **Weight Renormalization:** When OCR text is absent from the candidate photograph, visual weights are automatically renormalized to sum to 1.0.
 
----
-
-## 3. Shipping-Label Analysis Flow & Extracted Fields
-
-The shipping-label parser extracts and normalizes structured fields from raw OCR bounding boxes:
-
-1. **Extracted Fields:**
-   * `tracking_id`: Canonical courier tracking number (e.g. `FMPC6414359435`, `TBA123456789012`, `BLK-PNQ-5521`).
-   * `order_id`: E-commerce platform order ID (e.g. `DEMO-OD-FLIPKART-88214`, `402-9981245-11002`).
-   * `platform`: Shopping platform (`amazon`, `flipkart`, `blinkit`, `other`).
-   * `courier_name`: Courier service provider (Ekart Logistics, Amazon Shipping / ATS, Delhivery, Blue Dart, etc.).
-   * `customer_name`: Recipient name parsed from delivery address lines.
-   * `pin_code`: 6-digit destination postal PIN code.
-   * `phone_number`: Recipient contact number (strictly masked for privacy, e.g. `XXXXXX3210`).
-   * `seller_name`: Merchant or seller listed on invoice/label.
-   * `product_description`: Printed product title, SKU, or model description.
-   * `quantity`: Printed item quantity.
-
-2. **Field Confidence Scoring:**
-   Every field includes a confidence score (0.0 to 1.0) combining underlying OCR quality, pattern strength (explicit prefix vs regex token), and cross-frame observation consistency.
-
-3. **Multi-Frame Consensus:**
-   In video unboxing streams, the same label may appear across multiple frames. The parser groups identical normalized candidates, counts distinct supporting frames, and selects the sharpest evidence frame while prioritizing multi-frame agreement.
+### C. Structured Verification Reports
+Synthesizes barcode verification, 8-field shipping-label extraction, and product matching into an explainable verdict:
+* `verified`: Known barcode + matching label + matching product.
+* `likely_verified`: Known barcode + incomplete label + likely product match.
+* `mismatch`: Barcode/order contradiction, label mismatch, or product mismatch.
+* `manual_review_required`: Unreadable barcode, missing reference images, or insufficient visual evidence.
+* **PII Masking:** Customer names (`D*** C***`), emails (`d***@example.com`), and street addresses are automatically masked.
+* **HTML Reports:** Responsive standalone HTML document with modern dark-mode aesthetic, component breakdown scorecards, warning alerts, and mobile/laptop compatibility.
 
 ---
 
-## 4. Barcode vs. Label Cross-Check Logic
+## 3. Demonstration Orders
 
-| Scenario | Barcode Result | Label OCR Result | Final Combined Decision | Explanation |
+The system includes pre-seeded demonstration orders:
+
+| Platform | Order ID | Tracking ID / Barcode | Product | Expected Colour |
 | :--- | :--- | :--- | :--- | :--- |
-| **1. Full Agreement** | Matches Order A | Matches Order A | `verified` | Strong independent verification from both physical sources. |
-| **2. Label Unreadable** | Matches Order A | Insufficient text | `verified` (with notice) | Barcode verified; physical label is blurry or partially obscured. |
-| **3. Direct Contradiction**| Matches Order A | Matches Order B / conflicts | `details_mismatch` / `manual_review_required` | Physical package label text directly contradicts the scanned barcode. |
-| **4. Barcode Missing** | Not found / unreadable | Matches Order A | `manual_review_required` | Label matches registered order, but barcode was unreadable or missing. |
-| **5. Neither Found** | Not found | Not found | `order_not_found` / `insufficient_evidence` | Package identifier is completely unrecognized in the system. |
+| **Flipkart** | `OD290920260550001234` | `VGR055-DEMO-2026-01` | VGR V-055 Professional Hair Trimmer | Black/Blue |
+| **Flipkart** | `DEMO-OD-FLIPKART-88214`| `FMPC6414359435` | Rocsil Analog Watch For Women | Black |
+| **Amazon** | `DEMO-AMZ-402-9981245-11002`| `AMZN-IN-981240182` | Sony WH-1000XM5 Wireless Headphones | Silver |
+| **Blinkit** | `DEMO-BLK-99381023` | `BLK-PNQ-5521` | Nescafe Classic Coffee 200g Jar | Brown |
+
+> **VGR Demo QR Payload:** The package QR code contains only `VGR055-DEMO-2026-01`. The backend uses this decoded value to retrieve the complete order from SQLite.
 
 ---
 
-## 5. Privacy Safeguards & Compliance
+## 4. Open-Source Libraries Reused
 
-* **Phone Number Masking:** Customer phone numbers detected on shipping labels are masked (only the last 4 digits are retained).
-* **PII Redaction:** Full street addresses and customer email addresses are never returned in public label comparisons.
-* **Local Processing:** EasyOCR and ZXing run entirely offline on the local CPU/GPU; no image data is sent to external cloud APIs.
-
----
-
-## 6. Example API Output (`POST /api/analyze`)
-
-```json
-{
-  "analysis_id": "cf7c7795cc004acf8f8f345b08c1f9a3",
-  "status": "completed",
-  "created_at": "2026-09-19T18:00:00Z",
-  "original_filename": "shipping_label.png",
-  "input_type": "image",
-  "frames_processed": 1,
-  "codes": [
-    {
-      "type": "Code 128",
-      "text": "FMPC6414359435",
-      "first_seen_in": "shipping_label.png",
-      "sharpness": 284.15,
-      "video_timestamp_seconds": 0.0,
-      "position": {
-        "top_left": {"x": 42, "y": 180},
-        "top_right": {"x": 310, "y": 180},
-        "bottom_right": {"x": 310, "y": 240},
-        "bottom_left": {"x": 42, "y": 240}
-      }
-    }
-  ],
-  "order_verification": {
-    "verification_status": "verified",
-    "matched_order": {
-      "order_id": "DEMO-OD-FLIPKART-88214",
-      "tracking_id": "FMPC6414359435",
-      "barcode_value": "FMPC6414359435",
-      "platform": "flipkart",
-      "customer_name": "Demo Student User (Testing)",
-      "order_status": "delivered"
-    },
-    "mismatch_reasons": []
-  },
-  "label_analysis": {
-    "status": "verified",
-    "parsed_fields": {
-      "tracking_id": {
-        "value": "FMPC6414359435",
-        "normalized_value": "FMPC6414359435",
-        "confidence": 0.95
-      },
-      "order_id": {
-        "value": "DEMO-OD-FLIPKART-88214",
-        "normalized_value": "DEMOODFLIPKART88214",
-        "confidence": 0.95
-      },
-      "platform": {
-        "value": "flipkart",
-        "normalized_value": "flipkart",
-        "confidence": 0.95
-      },
-      "customer_name": {
-        "value": "Demo Student User",
-        "normalized_value": "demo student user",
-        "confidence": 0.90
-      },
-      "pin_code": {
-        "value": "411037",
-        "normalized_value": "411037",
-        "confidence": 0.90
-      }
-    },
-    "field_comparisons": [
-      {
-        "field_name": "tracking_id",
-        "status": "match",
-        "label_value": "FMPC6414359435",
-        "order_value": "FMPC6414359435",
-        "confidence": 0.95
-      },
-      {
-        "field_name": "platform",
-        "status": "match",
-        "label_value": "flipkart",
-        "order_value": "flipkart",
-        "confidence": 0.95
-      }
-    ],
-    "supporting_frames": ["shipping_label.png"],
-    "warnings": []
-  }
-}
-```
+| Package | Upstream URL | License | Purpose |
+| :--- | :--- | :--- | :--- |
+| **ImageHash** | [github.com/JohannesBuchner/imagehash](https://github.com/JohannesBuchner/imagehash) | BSD-2-Clause | Perceptual image hashing (pHash, dHash) |
+| **OpenCV** | [github.com/opencv/opencv-python](https://github.com/opencv/opencv-python) | Apache 2.0 | Frame extraction, HSV color histograms, ORB feature matching |
+| **EasyOCR** | [github.com/JaidedAI/EasyOCR](https://github.com/JaidedAI/EasyOCR) | Apache 2.0 | Deep-learning optical character recognition |
+| **ZXing-CPP** | [github.com/zxing-cpp/zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) | Apache 2.0 | High-performance 1D/2D barcode & QR scanning |
+| **Jinja2** | [github.com/pallets/jinja](https://github.com/pallets/jinja) | BSD-3-Clause | Responsive HTML verification report rendering |
+| **Pillow (PIL)**| [github.com/python-pillow/Pillow](https://github.com/python-pillow/Pillow) | HPND | Image format loading, conversion, and validation |
 
 ---
 
-## 7. Known OCR Limitations
+## 5. End-to-End Swagger Demo Sequence (VGR V-055 Trimmer)
 
-* **Severe Motion Blur:** Fast camera motion during unboxing videos reduces OCR character recognition accuracy. The system uses Laplacian variance sharpness scoring to mitigate this by picking the sharpest frames.
-* **Creased & Damaged Labels:** Thermal paper creases or barcode tearing can obscure characters; multi-frame consensus aggregates observations across multiple viewing angles.
-* **Low Thermal Contrast:** Faded thermal shipping labels with low print contrast may require manual review.
+1. **Start Backend Server:**
+   * *Option A (from repository root):*
+     ```powershell
+     backend\venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --reload --reload-dir backend/app
+     ```
+   * *Option B (from backend directory):*
+     ```powershell
+     cd backend
+     .\venv\Scripts\python.exe -m uvicorn app.main:app --reload
+     ```
+2. **Open Interactive Docs:** Navigate to `http://127.0.0.1:8000/docs`.
+3. **Verify Demo Order:**
+   * Execute `GET /api/orders/OD290920260550001234` or `GET /api/orders/barcode/VGR055-DEMO-2026-01`.
+   * Confirm the order and item details are returned.
+4. **Upload Reference Product Photograph:**
+   * Execute `POST /api/orders/OD290920260550001234/references`.
+   * Attach your reference image file of the VGR trimmer.
+   * Form fields: `product_name`: `VGR V-055 Professional Hair Trimmer`, `brand`: `VGR`, `model`: `V-055`, `colour`: `Black/Blue`.
+5. **Run Package Analysis:**
+   * Execute `POST /api/analyze` with the delivered package image or unboxing video.
+   * Copy the returned `verification_session_id`.
+6. **Run Product Matching Analysis:**
+   * Execute `POST /api/product-matching/analyze`.
+   * `order_id`: `OD290920260550001234`.
+   * `verification_session_id`: Session ID from step 5.
+   * `file`: Delivered product photograph or unboxing video frame.
+   * Review component breakdown scores and decision (`match` / `likely_match`).
+7. **Generate Verification Report:**
+   * Execute `POST /api/reports/generate/{session_id}` with the session ID from step 5.
+   * Review JSON verdict, masked customer information, and report URLs.
+8. **View Responsive HTML Report:**
+   * Open `http://127.0.0.1:8000/api/reports/{report_id}/html` in your browser.
 
 ---
 
-## 8. Setup & Test Commands (Windows Powershell)
-
-Ensure you have Python 3.11 installed. From the `backend` directory:
+## 6. Setup & PowerShell Commands
 
 ```powershell
-# 1. Activate virtual environment
-.\venv\Scripts\Activate.ps1
+# 1. Verify environment import
+backend\venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'backend'); import app.main; print('Import successful')"
 
-# 2. Install dependencies
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
+# 2. Run targeted Phase 3 tests
+backend\venv\Scripts\python.exe -m pytest backend\tests\test_product_references.py -v
+backend\venv\Scripts\python.exe -m pytest backend\tests\test_product_matching.py -v
+backend\venv\Scripts\python.exe -m pytest backend\tests\test_reports.py -v
 
-# 3. Verify backend import
-.\venv\Scripts\python.exe -c "import app.main; print('Import successful')"
+# 3. Run complete backend test suite (69 tests)
+backend\venv\Scripts\python.exe -m pytest backend\tests -v
 
-# 4. Run full automated test suite (33 tests)
-.\venv\Scripts\python.exe -m pytest -v
+# 4. Start backend server (from repository root)
+backend\venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --reload --reload-dir backend/app
 
-# 5. Start development server
-.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --reload-dir app
+# Or start backend server (from backend directory)
+cd backend
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-* **Interactive API Documentation (Swagger UI):** `http://127.0.0.1:8000/docs`
-* **Alternative API Documentation (ReDoc):** `http://127.0.0.1:8000/redoc`
+
+---
+
+## 7. Known Limitations
+
+* **Severe Specular Reflections:** Highly reflective glossy packaging or transparent plastic wrap can degrade local visual feature (ORB) matching. Perceptual hashing and HSV color distribution compensate for this.
+* **Extreme Camera Motion Blur:** Video frames captured during rapid camera rotation have reduced sharpness; the system automatically ranks frames by Laplacian variance to filter out blurry frames.
+* **No Custom Fine-Tuned Model:** Visual verification relies on explainable computer vision algorithms (perceptual hashing, color histograms, ORB feature matching) and OCR tokens rather than deep end-to-end classification models.

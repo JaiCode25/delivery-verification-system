@@ -5,7 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.analysis import router as analysis_router
 from app.api.orders import router as orders_router
+from app.api.product_matching import router as product_matching_router
+from app.api.reports import router as reports_router
 from app.api.verification import router as verification_router
+from app.api.quantity_verification import router as quantity_router
+from app.api.condition_analysis import router as condition_router
 from app.config import settings
 from app.database.connection import init_db
 from app.database.seed import seed_demonstration_orders
@@ -20,9 +24,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Delivery Verification System - Phase 1",
-    description="Package media analysis, barcode decoding, label OCR, and SQLite order verification.",
-    version="1.1.0",
+    title="Delivery Verification System",
+    description="Package media analysis, barcode decoding, label OCR, hybrid product matching, and verification reports.",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -37,6 +41,10 @@ app.add_middleware(
 app.include_router(analysis_router)
 app.include_router(orders_router)
 app.include_router(verification_router)
+app.include_router(product_matching_router)
+app.include_router(reports_router)
+app.include_router(quantity_router)
+app.include_router(condition_router)
 
 
 @app.get("/")

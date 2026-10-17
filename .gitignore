@@ -31,3 +31,7 @@ backend/storage/reports/*
 *.db
 *.sqlite
 *.sqlite3
+
+# Local verification artifacts and optional model caches
+.verification/
+backend/storage/models/

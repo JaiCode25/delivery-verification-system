@@ -38,3 +38,18 @@ class LabelVerificationStatus(str, Enum):
     MISMATCH = "mismatch"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     MANUAL_REVIEW_REQUIRED = "manual_review_required"
+
+
+class ProductMatchDecision(str, Enum):
+    MATCH = "match"
+    LIKELY_MATCH = "likely_match"
+    MISMATCH = "mismatch"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class OverallVerificationDecision(str, Enum):
+    ISSUE_DETECTED = "issue_detected"
+    VERIFIED = "verified"
+    LIKELY_VERIFIED = "likely_verified"
+    MISMATCH = "mismatch"
+    MANUAL_REVIEW_REQUIRED = "manual_review_required"

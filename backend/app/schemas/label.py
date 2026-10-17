@@ -53,8 +53,23 @@ class ParsedShippingLabel(BaseModel):
     phone_number: Optional[ParsedField] = None
     seller_name: Optional[ParsedField] = None
     product_description: Optional[ParsedField] = None
+    colour_model: Optional[ParsedField] = None
     quantity: Optional[ParsedField] = None
     raw_evidence: List[str] = Field(default_factory=list, description="List of raw OCR strings used during parsing")
+
+
+class LabelSummary(BaseModel):
+    """Concise 8-field summary of extracted shipping label information."""
+    model_config = ConfigDict(from_attributes=True)
+
+    platform: Optional[str] = None
+    courier: Optional[str] = None
+    order_id: Optional[str] = None
+    tracking_number: Optional[str] = None
+    pin_code: Optional[str] = None
+    product: Optional[str] = None
+    colour_model: Optional[str] = None
+    quantity: Optional[int] = None
 
 
 class FieldComparison(BaseModel):
@@ -72,6 +87,7 @@ class LabelAnalysisResult(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     status: LabelVerificationStatus = Field(..., description="Overall label verification outcome")
+    summary: LabelSummary = Field(default_factory=LabelSummary, description="Concise 8-field summary of extracted label information")
     parsed_fields: ParsedShippingLabel = Field(default_factory=ParsedShippingLabel)
     field_comparisons: List[FieldComparison] = Field(default_factory=list)
     supporting_frames: List[str] = Field(default_factory=list, description="Frames containing readable label evidence")

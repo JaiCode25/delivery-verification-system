@@ -2,12 +2,27 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import cv2
+import numpy as np
+from PIL import Image, ImageOps
 import zxingcpp
 
 
 def detect_codes(image_path: Path) -> List[Dict[str, Any]]:
     """Detect and decode QR codes and barcodes using ZXing-C++, including bounding coordinates."""
     image = cv2.imread(str(image_path))
+    if image is None:
+        try:
+            pil_img = Image.open(image_path)
+            pil_img = ImageOps.exif_transpose(pil_img)
+            if pil_img.mode in ("1", "L", "LA"):
+                pil_img = pil_img.convert("RGB")
+            elif pil_img.mode in ("RGBA", "P"):
+                pil_img = pil_img.convert("RGB")
+            rgb_arr = np.array(pil_img, dtype=np.uint8)
+            image = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+        except Exception:
+            return []
+
     if image is None:
         return []
 

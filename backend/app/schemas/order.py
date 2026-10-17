@@ -6,6 +6,25 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.enums import OrderStatus, Platform
 
 
+class ProductReferenceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    order_id: int
+    order_item_id: int
+    relative_path: str
+    original_filename: str
+    file_size_bytes: int
+    mime_type: str
+    created_at: datetime
+
+
+class ProductReferenceListResponse(BaseModel):
+    order_id: str
+    total_references: int
+    references: List[ProductReferenceRead]
+
+
 class OrderItemBase(BaseModel):
     product_name: str = Field(..., min_length=1, max_length=255)
     brand: str = Field(..., min_length=1, max_length=100)
@@ -23,6 +42,8 @@ class OrderItemCreate(OrderItemBase):
 class OrderItemRead(OrderItemBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    created_at: Optional[datetime] = None
+    references: List[ProductReferenceRead] = []
 
 
 class OrderBase(BaseModel):
@@ -47,6 +68,7 @@ class OrderRead(OrderBase):
     id: int
     created_at: datetime
     items: List[OrderItemRead] = []
+    references: List[ProductReferenceRead] = []
 
 
 class OrderSummary(BaseModel):

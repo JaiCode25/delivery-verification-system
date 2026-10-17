@@ -14,12 +14,16 @@ storage/uploads/*
 storage/frames/*
 storage/results/*
 storage/reports/*
+storage/references/*
+storage/references/**
 
 # Preserve .gitkeep files
 !storage/uploads/.gitkeep
 !storage/frames/.gitkeep
 !storage/results/.gitkeep
 !storage/reports/.gitkeep
+!storage/references/.gitkeep
+!storage/references/**/.gitkeep
 
 # Model weights
 *.pt

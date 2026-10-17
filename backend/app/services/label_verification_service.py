@@ -17,6 +17,7 @@ from app.schemas.label import (
 from app.schemas.verification import OrderVerificationResult
 from app.services.label_parser import (
     PIN_CODE_RE,
+    build_label_summary,
     normalize_comparison_string,
     normalize_name,
     normalize_tracking_id,
@@ -355,13 +356,46 @@ def cross_check_barcode_and_label(
             supporting_frames.append(field.source_frame)
     supporting_frames = list(dict.fromkeys(supporting_frames))
 
+    # Initialize warnings and build concise 8-field summary
+    warnings: List[str] = []
+    summary = build_label_summary(parsed_label)
+
+    # Cross-check barcode tracking vs label tracking contradiction
+    if (
+        barcode_result
+        and barcode_result.decoded_value
+        and parsed_label.tracking_id
+        and parsed_label.tracking_id.value
+    ):
+        dec_norm = normalize_tracking_id(barcode_result.decoded_value)
+        lbl_norm = parsed_label.tracking_id.normalized_value
+        if dec_norm and lbl_norm and dec_norm != lbl_norm:
+            warnings.append(
+                f"Contradiction alert: Barcode decoded as '{barcode_result.decoded_value}', but label text displays tracking number '{parsed_label.tracking_id.value}'."
+            )
+
+    # Check for low OCR confidence (< 0.60) on any detected field
+    for f_name, f_cand in [
+        ("platform", parsed_label.platform),
+        ("courier", parsed_label.courier_name),
+        ("order_id", parsed_label.order_id),
+        ("tracking_number", parsed_label.tracking_id),
+        ("pin_code", parsed_label.pin_code),
+        ("product", parsed_label.product_description),
+        ("colour_model", parsed_label.colour_model),
+        ("quantity", parsed_label.quantity),
+    ]:
+        if f_cand and f_cand.confidence < 0.60:
+            warnings.append(f"Low OCR confidence ({f_cand.confidence:.2f}) for detected field '{f_name}'.")
+
     # Scenario A: Barcode matched an order in the database
     if matched_order:
-        comparisons, label_status, warnings = compare_label_with_order(
+        comparisons, label_status, cmp_warnings = compare_label_with_order(
             parsed_label=parsed_label,
             order=matched_order,
             expected_product_name=expected_product_name,
         )
+        warnings.extend(cmp_warnings)
 
         # Cross-check Scenario 3: Barcode matched an order, but label ID contradicts it
         if label_status == LabelVerificationStatus.MISMATCH:
@@ -371,10 +405,11 @@ def cross_check_barcode_and_label(
 
         return LabelAnalysisResult(
             status=label_status,
+            summary=summary,
             parsed_fields=parsed_label,
             field_comparisons=comparisons,
             supporting_frames=supporting_frames,
-            warnings=warnings,
+            warnings=list(dict.fromkeys(warnings)),
         )
 
     # Scenario B: Barcode did NOT match an order.
@@ -389,26 +424,28 @@ def cross_check_barcode_and_label(
 
     if found_order:
         # Cross-check Scenario 4: Barcode is not found, but a readable label identifier matches an order
-        comparisons, _, warnings = compare_label_with_order(
+        comparisons, _, cmp_warnings = compare_label_with_order(
             parsed_label=parsed_label,
             order=found_order,
             expected_product_name=expected_product_name,
         )
+        warnings.extend(cmp_warnings)
         warnings.append(
             "Cross-check notice: Barcode was not detected or matched, but printed label ID corresponds to order. Manual review required."
         )
         return LabelAnalysisResult(
             status=LabelVerificationStatus.MANUAL_REVIEW_REQUIRED,
+            summary=summary,
             parsed_fields=parsed_label,
             field_comparisons=comparisons,
             supporting_frames=supporting_frames,
-            warnings=warnings,
+            warnings=list(dict.fromkeys(warnings)),
         )
 
     # Scenario C: Neither barcode nor label identifies an order in the database
     # Build default comparisons against expected values if provided
     comparisons = []
-    warnings = ["No registered order was found matching either the barcode or the shipping label text."]
+    warnings.append("No registered order was found matching either the barcode or the shipping label text.")
 
     if parsed_label.tracking_id:
         comparisons.append(
@@ -422,8 +459,9 @@ def cross_check_barcode_and_label(
 
     return LabelAnalysisResult(
         status=LabelVerificationStatus.INSUFFICIENT_EVIDENCE,
+        summary=summary,
         parsed_fields=parsed_label,
         field_comparisons=comparisons,
         supporting_frames=supporting_frames,
-        warnings=warnings,
+        warnings=list(dict.fromkeys(warnings)),
     )

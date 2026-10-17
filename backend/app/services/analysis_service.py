@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import MAX_OCR_FRAMES, RESULT_DIR
 from app.database.connection import SessionLocal
+from app.database.models import VerificationSession
 from app.schemas.enums import LabelVerificationStatus, VerificationStatus
 from app.services.code_detector import detect_codes
 from app.services.frame_extractor import extract_frame_metadata
@@ -157,6 +158,32 @@ def analyze_media(
                 verification_res.mismatch_reasons.append(
                     "Cross-check alert: Shipping label text contradicts the barcode-matched order record."
                 )
+
+        # Persist analysis metadata and structured label results on the VerificationSession
+        if verification_res.verification_session_id:
+            v_session = (
+                session.query(VerificationSession)
+                .filter(VerificationSession.id == verification_res.verification_session_id)
+                .first()
+            )
+            if v_session:
+                v_session.analysis_id = analysis_id
+                v_session.input_type = media_type
+                v_session.original_filename = original_name
+                v_session.label_analysis_status = (
+                    label_analysis_res.status.value
+                    if hasattr(label_analysis_res.status, "value")
+                    else str(label_analysis_res.status)
+                )
+                v_session.label_summary = label_analysis_res.summary.model_dump(mode="json")
+                v_session.label_analysis_data = label_analysis_res.model_dump(mode="json")
+                v_session.verification_status = (
+                    verification_res.verification_status.value
+                    if hasattr(verification_res.verification_status, "value")
+                    else str(verification_res.verification_status)
+                )
+                v_session.mismatch_reasons = verification_res.mismatch_reasons
+                session.commit()
 
         verification_dict = verification_res.model_dump(mode="json")
         label_analysis_dict = label_analysis_res.model_dump(mode="json")

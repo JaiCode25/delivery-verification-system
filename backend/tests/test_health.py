@@ -17,7 +17,7 @@ def test_health_endpoint(client):
 
 def test_seed_idempotency(db_session):
     first_run = seed_demonstration_orders(session=db_session)
-    assert len(first_run) == 3
+    assert len(first_run) == 4
 
     second_run = seed_demonstration_orders(session=db_session)
     assert len(second_run) == 0
