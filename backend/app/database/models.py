@@ -229,6 +229,8 @@ class ComplaintDraft(Base):
     idempotency_key = Column(String(100), nullable=True, index=True)
     manual_inquiry = Column(Boolean, nullable=False, default=False)
     warnings = Column(JSON, nullable=False, default=list)
+    intended_platform = Column(String(100), nullable=True)
+    destination_confirmed = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 

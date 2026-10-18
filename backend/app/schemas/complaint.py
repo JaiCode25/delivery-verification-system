@@ -56,6 +56,8 @@ class ComplaintDraftUpdate(BaseModel):
     body_html: Optional[str] = Field(None, min_length=1)
     recipient_email: Optional[str] = Field(None, max_length=200)
     requested_resolution: Optional[ResolutionType] = None
+    intended_platform: Optional[str] = Field(None, max_length=100, description="Explicitly confirmed retailer platform resolving contradiction (e.g. 'Amazon' or 'Flipkart')")
+    confirmed_destination: Optional[bool] = Field(None, description="Explicit confirmation that intended retailer platform and recipient email are verified")
 
     @field_validator("recipient_email")
     @classmethod
@@ -93,6 +95,8 @@ class ComplaintDraftRead(BaseModel):
     eligible: bool = False
     manual_inquiry: bool = False
     warnings: List[str] = []
+    intended_platform: Optional[str] = None
+    destination_confirmed: bool = False
 
 
 class ComplaintPreviewResponse(BaseModel):
@@ -109,6 +113,8 @@ class ComplaintPreviewResponse(BaseModel):
     manual_inquiry: bool = False
     warnings: List[str] = []
     issue_types: List[str] = []
+    intended_platform: Optional[str] = None
+    destination_confirmed: bool = False
 
 
 class ComplaintSendRequest(BaseModel):

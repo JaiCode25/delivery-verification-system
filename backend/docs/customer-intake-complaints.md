@@ -99,10 +99,15 @@ The complaint assistant strictly gates automated complaint recommendations behin
   - When the customer's specified platform (e.g. Amazon) contradicts the verified order record (e.g. Flipkart):
     - The backend **never** guesses or arbitrarily chooses either retailer.
     - Recipient email is left unresolved (`""`), and the addressee is set to generic `Customer Support Team`.
+    - Any recipient supplied during draft generation or regeneration (`regenerate=true`) is ignored while the contradiction is unresolved.
+    - Existing recipient emails are cleared upon draft regeneration or transition between formal complaint and manual inquiry whenever a platform contradiction is present.
     - A visible warning is appended to `warnings`:
       > *"Platform contradiction detected: Customer specified 'Amazon', but verified order record is 'Flipkart'. Recipient and platform addressee remain unresolved until confirmed."*
     - Attempting to send an unresolved draft (`POST /api/complaints/drafts/{id}/send`) is rejected with **HTTP 400 Bad Request**.
-    - The user must explicitly update `recipient_email` via `PATCH /api/complaints/drafts/{id}` before sending.
+    - Resolving the contradiction requires an explicit destination confirmation via `PATCH /api/complaints/drafts/{id}`:
+      - `intended_platform`: Confirmed retailer platform (e.g. `"Amazon"` or `"Flipkart"`).
+      - `recipient_email`: Valid production support email (placeholder domains like `@example.com`, `@example.org`, `@example.net` are rejected).
+      - `confirmed_destination`: `true` to record explicit user confirmation.
 - **Evidence & Attachment Grounding:**
   - The draft lists only files that actually exist in storage on disk (`actual_attached_filenames`).
   - If `report_id` is null, the draft explicitly states `Verification Report: None generated` and does not claim an attached report.
@@ -217,7 +222,15 @@ Follow these steps in the interactive Swagger UI (`http://127.0.0.1:8000/docs`):
   - Review HTML and plain-text output, `eligible`, `manual_inquiry`, `warnings`, and `issue_types`.
 - **Endpoint:** `PATCH /api/complaints/drafts/{draft_id}`
   - Customize subject or requested resolution.
-  - **Required on Platform Contradiction:** If customer platform differs from order records, `recipient_email` is unresolved (`""`). Update `recipient_email` to the verified support address before sending.
+  - **Required on Platform Contradiction:** If customer platform differs from order records, `recipient_email` is unresolved (`""`). Resolve and confirm the destination before sending:
+    ```json
+    {
+      "intended_platform": "Amazon",
+      "recipient_email": "cs-support@amazon.in",
+      "confirmed_destination": true
+    }
+    ```
+    *(Note: Placeholder domains like `@example.com` are rejected).*
 
 ### Step 7: Send Complaint
 - **Endpoint:** `POST /api/complaints/drafts/{draft_id}/send`

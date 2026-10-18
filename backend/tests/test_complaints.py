@@ -472,16 +472,169 @@ def test_observed_case_safeguards_regression(client, seeded_db):
         json={"confirmed": True},
     )
     assert send_fail.status_code == 400
-    assert "Recipient email is unresolved" in send_fail.json()["detail"]
+    assert "unresolved" in send_fail.json()["detail"].lower()
 
-    # 5. Patching verified recipient email enables transmission
-    patch_res = client.patch(
+    # 5. Patching only recipient email without confirming platform still leaves contradiction unresolved
+    patch_partial = client.patch(
         f"/api/complaints/drafts/{draft_id}",
         json={"recipient_email": "support@flipkart.com"},
     )
-    assert patch_res.status_code == 200
-    assert patch_res.json()["recipient_email"] == "support@flipkart.com"
+    assert patch_partial.status_code == 200
+    assert patch_partial.json()["recipient_email"] == "support@flipkart.com"
+    assert patch_partial.json()["destination_confirmed"] is False
 
+    send_still_fail = client.post(
+        f"/api/complaints/drafts/{draft_id}/send",
+        json={"confirmed": True},
+    )
+    assert send_still_fail.status_code == 400
+    assert "platform contradiction" in send_still_fail.json()["detail"].lower()
+
+    # 6. Explicit confirmed PATCH resolves platform contradiction
+    patch_confirmed = client.patch(
+        f"/api/complaints/drafts/{draft_id}",
+        json={
+            "intended_platform": "Flipkart",
+            "recipient_email": "support@flipkart.com",
+            "confirmed_destination": True,
+        },
+    )
+    assert patch_confirmed.status_code == 200
+    assert patch_confirmed.json()["intended_platform"] == "Flipkart"
+    assert patch_confirmed.json()["destination_confirmed"] is True
+    assert patch_confirmed.json()["recipient_email"] == "support@flipkart.com"
+
+    send_ok = client.post(
+        f"/api/complaints/drafts/{draft_id}/send",
+        json={"confirmed": True},
+    )
+    assert send_ok.status_code == 200
+    assert send_ok.json()["delivery_status"] == "dry_run"
+
+
+def test_regenerated_draft_clears_recipient_on_platform_contradiction(client, seeded_db):
+    """Test that regenerating an existing draft that had a recipient clears recipient_email
+
+    and rejects sending when platforms contradict, until an explicit confirmed PATCH is executed.
+    Reproduces Swagger retest scenario:
+    1. Create an order on Flipkart.
+    2. Verification session has damage detected (eligible).
+    3. Generate initial complaint draft: recipient_email defaults to support@flipkart.com.
+    4. Link a CustomerProductSubmission specifying platform Amazon (creating platform contradiction).
+    5. Regenerate draft with:
+       regenerate=true, allow_manual_inquiry=true, recipient_email="customer-support@example.com"
+    6. Verify recipient_email in draft response is "" (empty/unresolved), NOT "customer-support@example.com",
+       and NOT old "support@flipkart.com".
+    7. Verify send endpoint rejects with HTTP 400 while platform contradiction is unresolved.
+    8. Verify attempting to confirm destination with an @example.com email fails with HTTP 400.
+    9. Verify explicit confirmed PATCH with intended_platform, confirmed_destination=True, and valid production email allows dry-run sending.
+    """
+    order = seeded_db.query(Order).first()
+    order.platform = "flipkart"
+    seeded_db.commit()
+
+    session_id = uuid4().hex
+    session = VerificationSession(
+        id=session_id,
+        order_id=order.id,
+        verification_status="verified",
+        decoded_code=order.barcode_value,
+    )
+    seeded_db.add(session)
+
+    # Initial defect so draft generation succeeds normally
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.95},
+    )
+    seeded_db.add(cond)
+    seeded_db.commit()
+
+    # Initial formal draft (no customer submission yet, no contradiction)
+    draft_init_res = client.post(
+        "/api/complaints/drafts",
+        json={"verification_session_id": session_id, "requested_resolution": "replacement"},
+    )
+    assert draft_init_res.status_code == 201
+    init_draft = draft_init_res.json()
+    assert init_draft["recipient_email"] == "support@flipkart.com"
+    draft_id = init_draft["draft_id"]
+
+    # Now customer submits product intake claiming platform is Amazon
+    submission = CustomerProductSubmission(
+        id=uuid4().hex,
+        verification_session_id=session_id,
+        order_id=order.id,
+        product_name="Rocsil Analog Watch",
+        platform="amazon",
+        product_url="https://www.amazon.in/dp/B012345678",
+        normalized_product_url="https://www.amazon.in/dp/B012345678",
+        expected_quantity=1,
+        customer_name="Test User",
+        customer_email="test.user@customer.in",
+    )
+    seeded_db.add(submission)
+    seeded_db.commit()
+
+    # Regenerate draft as manual inquiry with contradictory platforms and supplied recipient
+    regen_res = client.post(
+        "/api/complaints/drafts",
+        json={
+            "verification_session_id": session_id,
+            "regenerate": True,
+            "allow_manual_inquiry": True,
+            "requested_resolution": "replacement",
+            "recipient_email": "customer-support@example.com",
+        },
+    )
+    assert regen_res.status_code == 201
+    regen_draft = regen_res.json()
+
+    # 1. recipient_email must be cleared to empty/unresolved value
+    assert regen_draft["recipient_email"] == ""
+    assert regen_draft["manual_inquiry"] is True
+    assert regen_draft["destination_confirmed"] is False
+    assert any("Platform contradiction detected" in w for w in regen_draft["warnings"])
+    assert "Customer Support Team" in regen_draft["body_text"]
+
+    # 2. send endpoint must reject sending with HTTP 400
+    send_reject = client.post(
+        f"/api/complaints/drafts/{draft_id}/send",
+        json={"confirmed": True},
+    )
+    assert send_reject.status_code == 400
+    assert "platform contradiction" in send_reject.json()["detail"].lower() or "unresolved" in send_reject.json()["detail"].lower()
+
+    # 3. Destination confirmation with @example.com address is rejected
+    example_patch = client.patch(
+        f"/api/complaints/drafts/{draft_id}",
+        json={
+            "intended_platform": "Amazon",
+            "recipient_email": "escalations@example.com",
+            "confirmed_destination": True,
+        },
+    )
+    assert example_patch.status_code == 400
+    assert "example.com" in example_patch.json()["detail"].lower()
+
+    # 4. Explicit confirmed PATCH with valid production recipient
+    patch_ok = client.patch(
+        f"/api/complaints/drafts/{draft_id}",
+        json={
+            "intended_platform": "Amazon",
+            "recipient_email": "cs-reply@amazon.in",
+            "confirmed_destination": True,
+        },
+    )
+    assert patch_ok.status_code == 200
+    patched_data = patch_ok.json()
+    assert patched_data["recipient_email"] == "cs-reply@amazon.in"
+    assert patched_data["intended_platform"] == "Amazon"
+    assert patched_data["destination_confirmed"] is True
+
+    # 5. Sending succeeds afterward in dry-run mode
     send_ok = client.post(
         f"/api/complaints/drafts/{draft_id}/send",
         json={"confirmed": True},

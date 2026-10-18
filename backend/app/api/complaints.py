@@ -125,6 +125,8 @@ def preview_complaint_draft(
         manual_inquiry=draft.manual_inquiry,
         warnings=draft.warnings or [],
         issue_types=draft.issue_types or [],
+        intended_platform=draft.intended_platform,
+        destination_confirmed=draft.destination_confirmed,
     )
 
 

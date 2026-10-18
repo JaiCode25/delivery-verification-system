@@ -175,6 +175,51 @@ def _sanitize_html(text: str) -> str:
     return html.escape(text).replace("\n", "<br>")
 
 
+def is_placeholder_or_invalid_email(email: Optional[str]) -> bool:
+    """Check if an email is empty, malformed, or an unconfirmed placeholder (e.g., @example.com)."""
+    if not email:
+        return True
+    email = email.strip().lower()
+    if "@" not in email:
+        return True
+    parts = email.split("@", 1)
+    if not parts[0] or not parts[1] or "." not in parts[1]:
+        return True
+    domain = parts[1]
+    if domain == "example.com" or domain.endswith(".example.com") or domain in ("example.org", "example.net"):
+        return True
+    return False
+
+
+def check_platform_contradiction(
+    db: Session,
+    draft: ComplaintDraft,
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Determine whether customer platform and verified order platform contradict for a draft."""
+    submission = draft.submission
+    if not submission and draft.verification_session_id:
+        submission = (
+            db.query(CustomerProductSubmission)
+            .filter(CustomerProductSubmission.verification_session_id == draft.verification_session_id)
+            .order_by(CustomerProductSubmission.created_at.desc())
+            .first()
+        )
+    order = draft.order
+    if not order and draft.verification_session_id:
+        v_session = db.query(VerificationSession).filter(VerificationSession.id == draft.verification_session_id).first()
+        if v_session and v_session.order_id:
+            order = db.query(Order).filter(Order.id == v_session.order_id).first()
+    elif not order and submission and submission.order_id:
+        order = db.query(Order).filter(Order.id == submission.order_id).first()
+
+    cust_platform = (submission.platform or "").strip().lower() if submission else None
+    order_platform = (order.platform or "").strip().lower() if order else None
+
+    if cust_platform and order_platform and cust_platform != order_platform:
+        return True, cust_platform, order_platform
+    return False, cust_platform, order_platform
+
+
 def generate_complaint_draft(
     db: Session,
     payload: ComplaintDraftCreate,
@@ -211,18 +256,10 @@ def generate_complaint_draft(
                 },
             )
         is_manual_inquiry = True
+    else:
+        is_manual_inquiry = bool(payload.allow_manual_inquiry)
 
-    # 2. Check for existing draft if not regenerating
-    existing_draft = (
-        db.query(ComplaintDraft)
-        .filter(ComplaintDraft.verification_session_id == payload.verification_session_id)
-        .order_by(ComplaintDraft.created_at.desc())
-        .first()
-    )
-    if existing_draft and not payload.regenerate:
-        return existing_draft
-
-    # 3. Look up submission, order, and report
+    # 2. Look up submission, order, and report
     submission: Optional[CustomerProductSubmission] = None
     if payload.submission_id:
         submission = db.query(CustomerProductSubmission).filter(CustomerProductSubmission.id == payload.submission_id).first()
@@ -247,7 +284,7 @@ def generate_complaint_draft(
         .first()
     )
 
-    # 4. Platform & Recipient resolution + Contradiction handling
+    # 3. Platform & Recipient resolution + Contradiction handling
     cust_platform = (submission.platform or "").strip().lower() if submission else None
     order_platform = (order.platform or "").strip().lower() if order else None
 
@@ -269,7 +306,8 @@ def generate_complaint_draft(
         # Do not automatically choose or address either retailer
         platform_addressee = "Customer Support Team"
         platform_display = f"Unresolved (Customer: {cust_platform.title()}, Order: {order_platform.title()})"
-        recipient = payload.recipient_email if payload.recipient_email else ""
+        # Requirement 1 & 2: Set recipient to empty unresolved value and ignore any supplied recipient_email
+        recipient = ""
     else:
         resolved_platform = order_platform or cust_platform or "retailer"
         platform_addressee = f"{resolved_platform.title()} Customer Support Team"
@@ -277,7 +315,26 @@ def generate_complaint_draft(
         recipient = payload.recipient_email
         if not recipient:
             platform_key = resolved_platform.lower()
-            recipient = settings.platform_support_emails.get(platform_key, "support@example.com")
+            recipient = settings.platform_support_emails.get(platform_key, "")
+
+    # 4. Check for existing draft
+    existing_draft = (
+        db.query(ComplaintDraft)
+        .filter(ComplaintDraft.verification_session_id == payload.verification_session_id)
+        .order_by(ComplaintDraft.created_at.desc())
+        .first()
+    )
+    is_transition = existing_draft is not None and existing_draft.manual_inquiry != is_manual_inquiry
+    should_regenerate = payload.regenerate or is_transition
+
+    if existing_draft and not should_regenerate:
+        # If contradiction exists and destination was not explicitly confirmed via PATCH,
+        # ensure recipient_email is cleared to empty unresolved value.
+        if platform_contradiction and not existing_draft.destination_confirmed and existing_draft.recipient_email:
+            existing_draft.recipient_email = ""
+            db.commit()
+            db.refresh(existing_draft)
+        return existing_draft
 
     # 5. Product details
     product_name = (
@@ -571,7 +628,6 @@ def generate_complaint_draft(
         existing_draft.subject = subject
         existing_draft.body_text = body_text
         existing_draft.body_html = body_html
-        existing_draft.recipient_email = recipient
         existing_draft.requested_resolution = payload.requested_resolution.value
         existing_draft.issue_types = eligibility.issue_types
         existing_draft.confidence_summary = eligibility.confidence_values
@@ -579,6 +635,12 @@ def generate_complaint_draft(
         existing_draft.disclaimers = disclaimers
         existing_draft.manual_inquiry = is_manual_inquiry
         existing_draft.warnings = draft_warnings
+        if platform_contradiction:
+            existing_draft.intended_platform = None
+            existing_draft.destination_confirmed = False
+            existing_draft.recipient_email = ""
+        else:
+            existing_draft.recipient_email = recipient
         existing_draft.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing_draft)
@@ -593,7 +655,7 @@ def generate_complaint_draft(
         subject=subject,
         body_text=body_text,
         body_html=body_html,
-        recipient_email=recipient,
+        recipient_email="" if platform_contradiction else recipient,
         requested_resolution=payload.requested_resolution.value,
         issue_types=eligibility.issue_types,
         confidence_summary=eligibility.confidence_values,
@@ -601,6 +663,8 @@ def generate_complaint_draft(
         disclaimers=disclaimers,
         manual_inquiry=is_manual_inquiry,
         warnings=draft_warnings,
+        intended_platform=None,
+        destination_confirmed=False,
         delivery_status="draft",
         delivery_attempts=[],
         created_at=datetime.now(timezone.utc),
@@ -622,10 +686,66 @@ def update_draft(
     draft_id: str,
     payload: ComplaintDraftUpdate,
 ) -> ComplaintDraft:
-    """Update editable complaint draft fields (subject, body, recipient, requested resolution)."""
+    """Update editable complaint draft fields (subject, body, recipient, requested resolution, platform destination)."""
     draft = get_draft(db, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail=f"Complaint draft '{draft_id}' not found.")
+
+    has_contra, cust_plat, order_plat = check_platform_contradiction(db, draft)
+
+    # Handle explicit platform contradiction resolution
+    if payload.confirmed_destination is True or payload.intended_platform is not None:
+        intended = (payload.intended_platform or draft.intended_platform or "").strip()
+        if not intended:
+            raise HTTPException(
+                status_code=400,
+                detail="Resolving platform contradiction requires specifying 'intended_platform' (e.g. 'Amazon' or 'Flipkart').",
+            )
+        if payload.confirmed_destination is not True:
+            raise HTTPException(
+                status_code=400,
+                detail="Resolving platform contradiction requires 'confirmed_destination': true.",
+            )
+        target_email = payload.recipient_email if payload.recipient_email is not None else draft.recipient_email
+        if is_placeholder_or_invalid_email(target_email):
+            raise HTTPException(
+                status_code=400,
+                detail="Resolving platform contradiction requires a valid production 'recipient_email' (cannot be empty or @example.com).",
+            )
+
+        draft.intended_platform = intended.title()
+        draft.destination_confirmed = True
+        draft.recipient_email = target_email.strip().lower()
+
+        # Update warnings: remove platform contradiction warning and append resolution note
+        filtered_warnings = [
+            w for w in (draft.warnings or [])
+            if "Platform contradiction detected" not in w
+        ]
+        resolution_notice = (
+            f"Platform contradiction resolved: Confirmed intended platform '{draft.intended_platform}' "
+            f"with recipient email '{draft.recipient_email}'."
+        )
+        if resolution_notice not in filtered_warnings:
+            filtered_warnings.append(resolution_notice)
+        draft.warnings = filtered_warnings
+
+        # Update addressee in body text and html if generic placeholder was present
+        if "Dear Customer Support Team," in draft.body_text:
+            draft.body_text = draft.body_text.replace(
+                "Dear Customer Support Team,",
+                f"Dear {draft.intended_platform} Customer Support Team,",
+            )
+        if "Dear <strong>Customer Support Team</strong>," in draft.body_html:
+            draft.body_html = draft.body_html.replace(
+                "Dear <strong>Customer Support Team</strong>,",
+                f"Dear <strong>{html.escape(draft.intended_platform)} Customer Support Team</strong>,",
+            )
+    else:
+        if payload.intended_platform is not None:
+            draft.intended_platform = payload.intended_platform.strip().title() if payload.intended_platform else None
+        if payload.confirmed_destination is False:
+            draft.destination_confirmed = False
 
     if payload.subject is not None:
         draft.subject = payload.subject.strip()
@@ -633,7 +753,7 @@ def update_draft(
         draft.body_text = payload.body_text
     if payload.body_html is not None:
         draft.body_html = payload.body_html
-    if payload.recipient_email is not None:
+    if payload.recipient_email is not None and not (payload.confirmed_destination is True or payload.intended_platform is not None):
         draft.recipient_email = payload.recipient_email.strip().lower()
     if payload.requested_resolution is not None:
         draft.requested_resolution = payload.requested_resolution.value
@@ -665,10 +785,24 @@ async def send_complaint(
     if not draft:
         raise HTTPException(status_code=404, detail=f"Complaint draft '{draft_id}' not found.")
 
-    if not draft.recipient_email or "@" not in draft.recipient_email or "." not in draft.recipient_email.split("@", 1)[1]:
+    # 1. Platform contradiction validation: reject if contradiction is unresolved
+    has_contra, cust_plat, order_plat = check_platform_contradiction(db, draft)
+    if has_contra and (not draft.destination_confirmed or not draft.intended_platform):
         raise HTTPException(
             status_code=400,
-            detail="Sending rejected: Recipient email is unresolved. Please update the draft with a confirmed recipient email before sending.",
+            detail=(
+                f"Sending rejected: A platform contradiction exists between customer platform ('{cust_plat.title()}') "
+                f"and order platform ('{order_plat.title()}'). "
+                "The destination is unresolved. Please perform an explicit PATCH providing 'intended_platform', "
+                "'confirmed_destination': true, and a valid production 'recipient_email' before sending."
+            ),
+        )
+
+    # 2. Check for unresolved, invalid, or placeholder (@example.com) recipient email
+    if is_placeholder_or_invalid_email(draft.recipient_email):
+        raise HTTPException(
+            status_code=400,
+            detail="Sending rejected: Recipient email is unresolved or a placeholder address (e.g. @example.com). Please update the draft with a confirmed production recipient email before sending.",
         )
 
     # Idempotency protection against rapid repeated button clicks

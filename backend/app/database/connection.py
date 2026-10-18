@@ -64,6 +64,8 @@ def init_db(target_engine=None) -> None:
                 cd_migrations = [
                     ("manual_inquiry", "ALTER TABLE complaint_drafts ADD COLUMN manual_inquiry BOOLEAN DEFAULT 0"),
                     ("warnings", "ALTER TABLE complaint_drafts ADD COLUMN warnings JSON DEFAULT '[]'"),
+                    ("intended_platform", "ALTER TABLE complaint_drafts ADD COLUMN intended_platform VARCHAR(100)"),
+                    ("destination_confirmed", "ALTER TABLE complaint_drafts ADD COLUMN destination_confirmed BOOLEAN DEFAULT 0"),
                 ]
                 for col_name, sql in cd_migrations:
                     if col_name not in existing_cd_cols:
