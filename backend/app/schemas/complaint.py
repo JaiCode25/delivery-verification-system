@@ -38,6 +38,7 @@ class ComplaintDraftCreate(BaseModel):
     custom_notes: Optional[str] = Field(None, max_length=2000, description="Optional custom notes from customer")
     recipient_email: Optional[str] = Field(None, max_length=200, description="Explicit recipient support email (if known)")
     regenerate: bool = Field(default=False, description="Whether to regenerate an existing draft for this session")
+    allow_manual_inquiry: bool = Field(default=False, description="Explicitly allow generating a manual review inquiry when automated evidence is inconclusive or not eligible")
 
     @field_validator("recipient_email")
     @classmethod
@@ -89,6 +90,9 @@ class ComplaintDraftRead(BaseModel):
     sent_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    eligible: bool = False
+    manual_inquiry: bool = False
+    warnings: List[str] = []
 
 
 class ComplaintPreviewResponse(BaseModel):
@@ -101,6 +105,10 @@ class ComplaintPreviewResponse(BaseModel):
     attached_evidence_filenames: List[str] = []
     disclaimers: List[str] = []
     delivery_status: str
+    eligible: bool = False
+    manual_inquiry: bool = False
+    warnings: List[str] = []
+    issue_types: List[str] = []
 
 
 class ComplaintSendRequest(BaseModel):

@@ -227,6 +227,8 @@ class ComplaintDraft(Base):
     delivery_attempts = Column(JSON, nullable=False, default=list)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     idempotency_key = Column(String(100), nullable=True, index=True)
+    manual_inquiry = Column(Boolean, nullable=False, default=False)
+    warnings = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -238,3 +240,7 @@ class ComplaintDraft(Base):
     @property
     def draft_id(self) -> str:
         return self.id
+
+    @property
+    def eligible(self) -> bool:
+        return bool(self.issue_types) and not bool(self.manual_inquiry)

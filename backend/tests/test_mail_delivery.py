@@ -43,6 +43,15 @@ def test_send_complaint_requires_confirmed_flag(client, seeded_db):
     seeded_db.add(session)
     seeded_db.commit()
 
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
+    seeded_db.commit()
+
     draft_res = client.post("/api/complaints/drafts", json={"verification_session_id": session.id})
     draft_id = draft_res.json()["draft_id"]
 
@@ -60,6 +69,15 @@ def test_dry_run_mail_delivery_success(client, seeded_db):
         decoded_code=order.barcode_value,
     )
     seeded_db.add(session)
+    seeded_db.commit()
+
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
     seeded_db.commit()
 
     draft_res = client.post("/api/complaints/drafts", json={"verification_session_id": session.id})
@@ -86,6 +104,15 @@ def test_idempotency_prevents_duplicate_dispatches(client, seeded_db):
         decoded_code=order.barcode_value,
     )
     seeded_db.add(session)
+    seeded_db.commit()
+
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
     seeded_db.commit()
 
     draft_res = client.post("/api/complaints/drafts", json={"verification_session_id": session.id})
@@ -118,6 +145,15 @@ def test_rate_limiting_rejects_rapid_repeat_sends(client, seeded_db):
         decoded_code=order.barcode_value,
     )
     seeded_db.add(session)
+    seeded_db.commit()
+
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
     seeded_db.commit()
 
     draft_res = client.post("/api/complaints/drafts", json={"verification_session_id": session.id})

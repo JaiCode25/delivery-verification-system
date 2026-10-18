@@ -53,7 +53,7 @@ This document describes the customer-facing product intake workflow, SSRF-safe U
 
 ---
 
-## 3. Complaint Eligibility Engine
+## 3. Complaint Eligibility Engine & Safeguards
 
 The complaint assistant strictly gates automated complaint recommendations behind a high-confidence threshold (default **0.80**):
 
@@ -64,26 +64,65 @@ The complaint assistant strictly gates automated complaint recommendations behin
 - **Inconclusive / Rejected Evidence (Not Eligible):**
   - Channels reporting `unsupported_product`, `insufficient_evidence`, `manual_review_required`, `model_unavailable`, or `no_visible_damage` do not trigger automated complaint recommendations.
   - Intermediate statuses like `likely_damaged` emit warnings recommending manual inspection before formal complaint filing.
+- **Strict Default Rejection (HTTP 409 Conflict):**
+  - By default, `POST /api/complaints/drafts` **rejects** draft creation with **HTTP 409 Conflict** if `eligibility.eligible` is `false` or `issue_types` is empty.
+  - The 409 response payload returns the complete eligibility context:
+    ```json
+    {
+      "detail": {
+        "message": "Complaint draft generation rejected: Verification evidence does not qualify for an automated complaint recommendation.",
+        "eligible": false,
+        "issue_types": [],
+        "warnings": [...],
+        "reasons": [...],
+        "confidence_values": {...},
+        "supporting_analysis_ids": {...},
+        "threshold": 0.80,
+        "allow_manual_inquiry_hint": "Set allow_manual_inquiry=true to generate a manual review inquiry when automated evidence is inconclusive."
+      }
+    }
+    ```
+- **Manual Inquiry Override (`allow_manual_inquiry=true`):**
+  - If a user wishes to escalate an inconclusive verification for manual customer service review, they must explicitly pass `"allow_manual_inquiry": true` (default is `false`).
+  - Manual inquiries follow strict non-accusatory formatting rules:
+    1. Subject: `Manual Delivery Verification Inquiry – [Product Name]`.
+    2. Tone: Inconclusive; states clearly that automated package checks did not confirm a defect.
+    3. Action: Formally requests human review by the support team.
+    4. Remedy: Phrased conditionally: *"If an issue is confirmed after review, I request..."*.
+    5. Never uses accusatory phrases like *"damaged or incorrect merchandise"* when no defect was confirmed.
 
 ---
 
-## 4. Complaint Draft Generation & Editing
+## 4. Complaint Draft Generation, Platform Contradictions & Evidence Integrity
 
+- **Platform Contradiction Handling:**
+  - When the customer's specified platform (e.g. Amazon) contradicts the verified order record (e.g. Flipkart):
+    - The backend **never** guesses or arbitrarily chooses either retailer.
+    - Recipient email is left unresolved (`""`), and the addressee is set to generic `Customer Support Team`.
+    - A visible warning is appended to `warnings`:
+      > *"Platform contradiction detected: Customer specified 'Amazon', but verified order record is 'Flipkart'. Recipient and platform addressee remain unresolved until confirmed."*
+    - Attempting to send an unresolved draft (`POST /api/complaints/drafts/{id}/send`) is rejected with **HTTP 400 Bad Request**.
+    - The user must explicitly update `recipient_email` via `PATCH /api/complaints/drafts/{id}` before sending.
+- **Evidence & Attachment Grounding:**
+  - The draft lists only files that actually exist in storage on disk (`actual_attached_filenames`).
+  - If `report_id` is null, the draft explicitly states `Verification Report: None generated` and does not claim an attached report.
+  - Vague or unestablished claims (such as *"evidence has been audited for data integrity"*) are omitted.
 - **Professional & Objective Phrasing:**
   - Factual and respectful tone suitable for customer support teams.
-  - No defamatory, abusive, or legal threats.
+  - No defamatory, abusive, or unsubstantiated legal claims.
   - Clearly includes:
     - Order & verification metadata
     - Technical verification findings with confidence scores
     - Customer remarks (sanitized against XSS injection)
     - Standard disclaimers acknowledging external visible condition assessment limitations.
 - **Resolution Options:**
-  - `replacement`: Full replacement of damaged or incorrect merchandise.
+  - `replacement`: Full replacement of damaged or incorrect merchandise (or conditional request if manual inquiry).
   - `refund`: Full refund to original payment method.
   - `missing_item_refund`: Partial refund corresponding to missing units.
   - `other`: Policy-based customer remedy.
 - **Draft Formats:**
   - Generates both clean plain text (`body_text`) and sanitized HTML (`body_html`).
+  - Draft response models include `eligible`, `manual_inquiry`, `warnings`, and `issue_types`.
   - Supports draft preview (`GET /api/complaints/drafts/{id}/preview`) and in-place editing (`PATCH /api/complaints/drafts/{id}`).
   - Supports explicit draft regeneration (`regenerate=true`).
 
@@ -156,26 +195,29 @@ Follow these steps in the interactive Swagger UI (`http://127.0.0.1:8000/docs`):
   - Returns `eligible: true/false`.
   - Shows `issue_types` (`wrong_product`, `quantity_mismatch`, `damaged_item`), confidence values, and reasons.
 
-### Step 5: Generate Complaint Draft
+### Step 5: Generate Complaint Draft (with Eligibility Safeguard)
 - **Endpoint:** `POST /api/complaints/drafts`
-- **Request Body:**
-  ```json
-  {
-    "verification_session_id": "<SESSION_ID>",
-    "requested_resolution": "replacement",
-    "custom_notes": "The outer packaging was severely dented."
-  }
-  ```
-- **Verify:**
-  - Returns 201 Created with `draft_id`.
-  - Professional subject and formatted body.
-  - Disclaimers populated.
+- **Case A — Ineligible Session (Default Safeguard):**
+  - If the session does not have confirmed defect evidence, calling `POST /api/complaints/drafts` will return **409 Conflict** with reasons and warnings explaining why automated complaints are disabled.
+- **Case B — Inconclusive Inquiry Override:**
+  - If manual support review is desired, submit with:
+    ```json
+    {
+      "verification_session_id": "<SESSION_ID>",
+      "allow_manual_inquiry": true,
+      "requested_resolution": "replacement"
+    }
+    ```
+  - Returns 201 Created with subject: `Manual Delivery Verification Inquiry – [Product]` and non-accusatory conditional wording.
+- **Case C — Eligible Session (Defect Detected):**
+  - Returns 201 Created with `draft_id`, specific issue details, and objective defect evidence.
 
 ### Step 6: Preview and Edit Draft
 - **Endpoint:** `GET /api/complaints/drafts/{draft_id}/preview`
-  - Review HTML and plain-text output.
+  - Review HTML and plain-text output, `eligible`, `manual_inquiry`, `warnings`, and `issue_types`.
 - **Endpoint:** `PATCH /api/complaints/drafts/{draft_id}`
   - Customize subject or requested resolution.
+  - **Required on Platform Contradiction:** If customer platform differs from order records, `recipient_email` is unresolved (`""`). Update `recipient_email` to the verified support address before sending.
 
 ### Step 7: Send Complaint
 - **Endpoint:** `POST /api/complaints/drafts/{draft_id}/send`
@@ -187,7 +229,8 @@ Follow these steps in the interactive Swagger UI (`http://127.0.0.1:8000/docs`):
   }
   ```
 - **Verify:**
-  - `delivery_status` is `"dry_run"`.
+  - If `recipient_email` was left unresolved, returns **HTTP 400 Bad Request** instructing user to update recipient email.
+  - When resolved, `delivery_status` is `"dry_run"`.
   - `delivery_attempt` record returned with timestamp.
   - Repeating with same `idempotency_key` returns the cached status without redispatching.
 

@@ -121,6 +121,10 @@ def preview_complaint_draft(
         attached_evidence_filenames=draft.attached_evidence_filenames or [],
         disclaimers=draft.disclaimers or [],
         delivery_status=draft.delivery_status,
+        eligible=draft.eligible,
+        manual_inquiry=draft.manual_inquiry,
+        warnings=draft.warnings or [],
+        issue_types=draft.issue_types or [],
     )
 
 

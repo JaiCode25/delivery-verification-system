@@ -13,7 +13,7 @@ import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -179,12 +179,40 @@ def generate_complaint_draft(
     db: Session,
     payload: ComplaintDraftCreate,
 ) -> ComplaintDraft:
-    """Generate or regenerate an objective, professional complaint draft."""
+    """Generate or regenerate an objective, professional complaint draft or manual inquiry.
+
+    Strictly gates automated complaints behind high-confidence eligibility (>= 0.80).
+    Rejects ineligible sessions with HTTP 409 unless allow_manual_inquiry=True.
+    Resolves platform contradictions, lists only actually attached evidence, and avoids
+    claiming unestablished data integrity or ungenerated reports.
+    """
     v_session = db.query(VerificationSession).filter(VerificationSession.id == payload.verification_session_id).first()
     if not v_session:
         raise HTTPException(status_code=404, detail=f"Verification session '{payload.verification_session_id}' not found.")
 
-    # Check for existing draft if not regenerating
+    # 1. Evaluate eligibility first
+    eligibility = check_complaint_eligibility(db, payload.verification_session_id)
+    is_manual_inquiry = False
+
+    if not eligibility.eligible or not eligibility.issue_types:
+        if not payload.allow_manual_inquiry:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Complaint draft generation rejected: Verification evidence does not qualify for an automated complaint recommendation.",
+                    "eligible": eligibility.eligible,
+                    "issue_types": eligibility.issue_types,
+                    "warnings": eligibility.warnings,
+                    "reasons": eligibility.reasons,
+                    "confidence_values": eligibility.confidence_values,
+                    "supporting_analysis_ids": eligibility.supporting_analysis_ids,
+                    "threshold": eligibility.threshold,
+                    "allow_manual_inquiry_hint": "Set allow_manual_inquiry=true to generate a manual review inquiry when automated evidence is inconclusive.",
+                },
+            )
+        is_manual_inquiry = True
+
+    # 2. Check for existing draft if not regenerating
     existing_draft = (
         db.query(ComplaintDraft)
         .filter(ComplaintDraft.verification_session_id == payload.verification_session_id)
@@ -194,7 +222,7 @@ def generate_complaint_draft(
     if existing_draft and not payload.regenerate:
         return existing_draft
 
-    # Look up submission and order
+    # 3. Look up submission, order, and report
     submission: Optional[CustomerProductSubmission] = None
     if payload.submission_id:
         submission = db.query(CustomerProductSubmission).filter(CustomerProductSubmission.id == payload.submission_id).first()
@@ -219,17 +247,39 @@ def generate_complaint_draft(
         .first()
     )
 
-    # Evaluate eligibility
-    eligibility = check_complaint_eligibility(db, payload.verification_session_id)
+    # 4. Platform & Recipient resolution + Contradiction handling
+    cust_platform = (submission.platform or "").strip().lower() if submission else None
+    order_platform = (order.platform or "").strip().lower() if order else None
 
-    # Resolve platform & recipient email
-    platform = (order.platform if order else (submission.platform if submission else "Retailer")).title()
-    recipient = payload.recipient_email
-    if not recipient:
-        platform_key = platform.lower()
-        recipient = settings.platform_support_emails.get(platform_key, "support@example.com")
+    platform_contradiction = False
+    if cust_platform and order_platform and cust_platform != order_platform:
+        platform_contradiction = True
 
-    # Product details
+    draft_warnings: List[str] = list(eligibility.warnings or [])
+
+    if platform_contradiction:
+        platform_warning = (
+            f"Platform contradiction detected: Customer specified '{cust_platform.title()}', "
+            f"but verified order record is '{order_platform.title()}'. "
+            "Recipient and platform addressee remain unresolved until confirmed."
+        )
+        if platform_warning not in draft_warnings:
+            draft_warnings.append(platform_warning)
+
+        # Do not automatically choose or address either retailer
+        platform_addressee = "Customer Support Team"
+        platform_display = f"Unresolved (Customer: {cust_platform.title()}, Order: {order_platform.title()})"
+        recipient = payload.recipient_email if payload.recipient_email else ""
+    else:
+        resolved_platform = order_platform or cust_platform or "retailer"
+        platform_addressee = f"{resolved_platform.title()} Customer Support Team"
+        platform_display = resolved_platform.title()
+        recipient = payload.recipient_email
+        if not recipient:
+            platform_key = resolved_platform.lower()
+            recipient = settings.platform_support_emails.get(platform_key, "support@example.com")
+
+    # 5. Product details
     product_name = (
         submission.product_name
         if submission
@@ -252,85 +302,150 @@ def generate_complaint_draft(
         else (order.customer_name if order else "Customer")
     )
 
-    # Format Subject line professionally
-    if "damaged_item" in eligibility.issue_types:
-        subject = f"Complaint: Damaged item received – {product_name}"
-    elif "wrong_product" in eligibility.issue_types:
-        subject = f"Complaint: Incorrect product received – {product_name}"
-    elif "quantity_mismatch" in eligibility.issue_types:
-        subject = f"Complaint: Quantity discrepancy – {product_name}"
+    # 6. Format Subject line
+    if is_manual_inquiry:
+        subject = f"Manual Delivery Verification Inquiry – {product_name}"
     else:
-        subject = f"Delivery Inquiry & Issue Report – {product_name}"
+        if "damaged_item" in eligibility.issue_types and "wrong_product" in eligibility.issue_types:
+            subject = f"Complaint: Damaged and incorrect product received – {product_name}"
+        elif "damaged_item" in eligibility.issue_types:
+            subject = f"Complaint: Damaged item received – {product_name}"
+        elif "wrong_product" in eligibility.issue_types:
+            subject = f"Complaint: Incorrect product received – {product_name}"
+        elif "quantity_mismatch" in eligibility.issue_types:
+            subject = f"Complaint: Quantity discrepancy – {product_name}"
+        else:
+            subject = f"Complaint: Delivery issue report – {product_name}"
 
-    # Build Issue descriptions
-    issue_lines = []
-    if not eligibility.issue_types:
-        issue_lines.append("Automated verification completed with inconclusive or manual-review evidence.")
-    for issue in eligibility.issue_types:
-        if issue == "damaged_item":
-            conf = eligibility.confidence_values.get("condition_analysis", 0.0)
-            issue_lines.append(f"- Visible Physical Damage / Tampering (confidence: {conf * 100:.1f}%)")
-        elif issue == "wrong_product":
-            conf = eligibility.confidence_values.get("product_matching", 0.0)
-            issue_lines.append(f"- Delivered Product Mismatch against Order Reference (confidence: {conf * 100:.1f}%)")
-        elif issue == "quantity_mismatch":
-            conf = eligibility.confidence_values.get("quantity_verification", 0.0)
-            issue_lines.append(f"- Delivered Quantity Discrepancy (confidence: {conf * 100:.1f}%)")
+    # 7. Build Issue / Verification status lines
+    issue_lines: List[str] = []
+    if is_manual_inquiry:
+        issue_lines.append("- Automated verification checks were completed with inconclusive evidence.")
+        issue_lines.append("- No automated defect (physical damage, product mismatch, or quantity discrepancy) was confirmed.")
+        issue_lines.append("- Requesting manual package review by customer support.")
+    else:
+        for issue in eligibility.issue_types:
+            if issue == "damaged_item":
+                conf = eligibility.confidence_values.get("condition_analysis", 0.0)
+                issue_lines.append(f"- Visible Physical Damage / Tampering (confidence: {conf * 100:.1f}%)")
+            elif issue == "wrong_product":
+                conf = eligibility.confidence_values.get("product_matching", 0.0)
+                issue_lines.append(f"- Delivered Product Mismatch against Order Reference (confidence: {conf * 100:.1f}%)")
+            elif issue == "quantity_mismatch":
+                conf = eligibility.confidence_values.get("quantity_verification", 0.0)
+                issue_lines.append(f"- Delivered Quantity Discrepancy (confidence: {conf * 100:.1f}%)")
 
-    resolution_text = {
-        ResolutionType.REPLACEMENT: "Full replacement of the damaged or incorrect merchandise",
-        ResolutionType.REFUND: "Full refund to the original payment method",
-        ResolutionType.MISSING_ITEM_REFUND: "Partial refund corresponding to missing units",
-        ResolutionType.OTHER: "Appropriate resolution as per customer protection policy",
-    }.get(payload.requested_resolution, "Prompt resolution of this delivery discrepancy")
+    # 8. Resolution text
+    if is_manual_inquiry:
+        resolution_text = {
+            ResolutionType.REPLACEMENT: "If an issue is confirmed after review, I request a replacement of the merchandise",
+            ResolutionType.REFUND: "If an issue is confirmed after review, I request a refund to the original payment method",
+            ResolutionType.MISSING_ITEM_REFUND: "If an issue is confirmed after review, I request a partial refund for any unverified units",
+            ResolutionType.OTHER: "If an issue is confirmed after review, I request appropriate resolution as per customer protection policy",
+        }.get(payload.requested_resolution, "If an issue is confirmed after review, I request appropriate resolution")
+    else:
+        if payload.requested_resolution == ResolutionType.REPLACEMENT:
+            if "damaged_item" in eligibility.issue_types and "wrong_product" in eligibility.issue_types:
+                resolution_text = "Full replacement of the damaged and incorrect merchandise"
+            elif "damaged_item" in eligibility.issue_types:
+                resolution_text = "Full replacement of the damaged merchandise"
+            elif "wrong_product" in eligibility.issue_types:
+                resolution_text = "Full replacement of the incorrect merchandise"
+            else:
+                resolution_text = "Full replacement of the affected merchandise"
+        elif payload.requested_resolution == ResolutionType.REFUND:
+            resolution_text = "Full refund to the original payment method"
+        elif payload.requested_resolution == ResolutionType.MISSING_ITEM_REFUND:
+            resolution_text = "Partial refund corresponding to missing units"
+        else:
+            resolution_text = "Appropriate resolution as per customer protection policy"
 
+    # 9. Disclaimers (Never claim 'audited for data integrity')
     disclaimers = [
-        "This complaint draft was generated using automated package inspection and delivery verification algorithms.",
+        "This draft was generated using automated package inspection and delivery verification algorithms.",
         "Assessments concern external visible condition and package labels; internal, electrical, or functional mechanisms were not inspected.",
-        "Evidence attachments and verification reports have been audited for data integrity.",
     ]
+    if is_manual_inquiry:
+        disclaimers.append("Automated checks were inconclusive; this inquiry serves as a request for human review.")
 
-    # Gather evidence files
-    evidence_files = []
+    # 10. Gather candidate evidence and validate what is ACTUALLY on disk
+    candidate_evidence: List[str] = []
     if v_session.evidence_frame:
-        evidence_files.append(v_session.evidence_frame)
+        candidate_evidence.append(v_session.evidence_frame)
     if report and isinstance(report.report_data, dict):
-        evidence_files.extend(report.report_data.get("evidence_filenames", []))
-    evidence_files = sorted(list(set(evidence_files)))
+        candidate_evidence.extend(report.report_data.get("evidence_filenames", []))
+    candidate_evidence = sorted(list(set(candidate_evidence)))
+
+    validated_paths, _, att_warnings = validate_and_prepare_attachments(
+        evidence_filenames=candidate_evidence,
+        report_id=report.id if report else None,
+        max_mb=settings.complaint_max_attachment_mb,
+    )
+    actual_attached_filenames = [p.name for p in validated_paths]
+    for aw in att_warnings:
+        if aw not in draft_warnings:
+            draft_warnings.append(aw)
 
     timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Plain text body
+    # 11. Plain text body
     body_text_lines = [
-        f"Dear {platform} Customer Support Team,",
+        f"Dear {platform_addressee},",
         "",
-        f"I am writing to formally report an issue regarding my recent delivery of {product_name}.",
+    ]
+    if is_manual_inquiry:
+        body_text_lines.extend([
+            f"I am writing to request a manual delivery verification review regarding my recent delivery of {product_name}.",
+            "Automated package verification checks were inconclusive, and no automated defect could be confirmed.",
+            "I kindly request human review by your customer support team.",
+        ])
+    else:
+        body_text_lines.extend([
+            f"I am writing to formally report an issue regarding my recent delivery of {product_name}.",
+        ])
+
+    body_text_lines.extend([
         "",
         "DELIVERY & PRODUCT DETAILS:",
         f"- Product Name: {product_name}",
-        f"- Platform/Store: {platform}",
+        f"- Platform/Store: {platform_display}",
         f"- Product URL: {product_url}",
         f"- Expected Quantity: {expected_qty}",
-    ]
+    ])
     if variant:
         body_text_lines.append(f"- Model / Variant: {variant}")
     if order and order.order_id:
         body_text_lines.append(f"- Verified Order ID: {order.order_id}")
     if order and order.tracking_id:
         body_text_lines.append(f"- Verified Tracking/AWB: {order.tracking_id}")
-    body_text_lines.extend([
-        f"- Verification Session ID: {v_session.id}",
-        f"- Report ID: {report.id if report else 'Pending'}",
-        f"- Date of Verification: {timestamp_str}",
-        "",
-        "SUMMARY OF DETECTED ISSUES:",
-    ])
+    body_text_lines.append(f"- Verification Session ID: {v_session.id}")
+
+    if report and report.id:
+        body_text_lines.append(f"- Verification Report ID: {report.id}")
+    else:
+        body_text_lines.append("- Verification Report: None generated")
+
+    body_text_lines.append(f"- Date of Verification: {timestamp_str}")
+    body_text_lines.append("")
+
+    if is_manual_inquiry:
+        body_text_lines.append("AUTOMATED VERIFICATION STATUS:")
+    else:
+        body_text_lines.append("SUMMARY OF DETECTED ISSUES:")
+
     body_text_lines.extend(issue_lines)
+
     if eligibility.reasons:
         body_text_lines.append("")
         body_text_lines.append("TECHNICAL FINDINGS:")
         for r in eligibility.reasons:
             body_text_lines.append(f"- {r}")
+
+    if draft_warnings:
+        body_text_lines.append("")
+        body_text_lines.append("SYSTEM WARNINGS & NOTICES:")
+        for w in draft_warnings:
+            body_text_lines.append(f"- {w}")
 
     if payload.custom_notes:
         body_text_lines.extend([
@@ -344,9 +459,22 @@ def generate_complaint_draft(
         "REQUESTED RESOLUTION:",
         f"I kindly request: {resolution_text}.",
         "",
-        "Please review the attached delivery verification evidence and confirm receipt at your earliest convenience.",
+    ])
+
+    if actual_attached_filenames:
+        body_text_lines.append("ATTACHED EVIDENCE FILES:")
+        for fn in actual_attached_filenames:
+            body_text_lines.append(f"- {fn}")
+        body_text_lines.append("")
+        body_text_lines.append("Please review the attached evidence files and confirm receipt at your earliest convenience.")
+    else:
+        body_text_lines.append("ATTACHED EVIDENCE: None")
+        body_text_lines.append("")
+        body_text_lines.append("No evidence files are attached. Please review the details above and confirm receipt at your earliest convenience.")
+
+    body_text_lines.extend([
         "",
-        f"Sincerely,",
+        "Sincerely,",
         customer_name,
         "",
         "---",
@@ -355,18 +483,29 @@ def generate_complaint_draft(
     body_text_lines.extend(disclaimers)
     body_text = "\n".join(body_text_lines)
 
-    # HTML Body
+    # 12. HTML Body
     body_html_parts = [
-        f"<p>Dear <strong>{html.escape(platform)}</strong> Customer Support Team,</p>",
-        f"<p>I am writing to formally report an issue regarding my recent delivery of <strong>{html.escape(product_name)}</strong>.</p>",
+        f"<p>Dear <strong>{html.escape(platform_addressee)}</strong>,</p>",
+    ]
+    if is_manual_inquiry:
+        body_html_parts.extend([
+            f"<p>I am writing to request a manual delivery verification review regarding my recent delivery of <strong>{html.escape(product_name)}</strong>.</p>",
+            "<p>Automated package verification checks were inconclusive, and no automated defect could be confirmed. I kindly request human review by your customer support team.</p>",
+        ])
+    else:
+        body_html_parts.append(
+            f"<p>I am writing to formally report an issue regarding my recent delivery of <strong>{html.escape(product_name)}</strong>.</p>"
+        )
+
+    body_html_parts.extend([
         "<hr style='border: 0; border-top: 1px solid #cbd5e1; margin: 16px 0;'>",
         "<h3 style='color: #0f172a; margin-bottom: 8px;'>Delivery & Product Details</h3>",
         "<table style='width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 16px;'>",
         f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Product:</td><td style='padding: 4px 8px;'>{html.escape(product_name)}</td></tr>",
-        f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Platform:</td><td style='padding: 4px 8px;'>{html.escape(platform)}</td></tr>",
+        f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Platform:</td><td style='padding: 4px 8px;'>{html.escape(platform_display)}</td></tr>",
         f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Product URL:</td><td style='padding: 4px 8px;'><a href='{html.escape(product_url)}'>{html.escape(product_url)}</a></td></tr>",
         f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Expected Quantity:</td><td style='padding: 4px 8px;'>{expected_qty}</td></tr>",
-    ]
+    ])
     if variant:
         body_html_parts.append(f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Variant:</td><td style='padding: 4px 8px;'>{html.escape(variant)}</td></tr>")
     if order and order.order_id:
@@ -374,10 +513,20 @@ def generate_complaint_draft(
     if order and order.tracking_id:
         body_html_parts.append(f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Tracking ID:</td><td style='padding: 4px 8px;'>{html.escape(order.tracking_id)}</td></tr>")
     body_html_parts.append(f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Session ID:</td><td style='padding: 4px 8px;'>{html.escape(v_session.id)}</td></tr>")
+
+    if report and report.id:
+        body_html_parts.append(f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Report ID:</td><td style='padding: 4px 8px;'>{html.escape(report.id)}</td></tr>")
+    else:
+        body_html_parts.append("<tr><td style='padding: 4px 8px; font-weight: bold;'>Report:</td><td style='padding: 4px 8px;'>None generated</td></tr>")
+
     body_html_parts.append(f"<tr><td style='padding: 4px 8px; font-weight: bold;'>Verified:</td><td style='padding: 4px 8px;'>{html.escape(timestamp_str)}</td></tr>")
     body_html_parts.append("</table>")
 
-    body_html_parts.append("<h3 style='color: #b91c1c; margin-bottom: 8px;'>Detected Delivery Issues</h3><ul>")
+    if is_manual_inquiry:
+        body_html_parts.append("<h3 style='color: #475569; margin-bottom: 8px;'>Automated Verification Status</h3><ul>")
+    else:
+        body_html_parts.append("<h3 style='color: #b91c1c; margin-bottom: 8px;'>Detected Delivery Issues</h3><ul>")
+
     for issue_item in issue_lines:
         body_html_parts.append(f"<li>{html.escape(issue_item)}</li>")
     body_html_parts.append("</ul>")
@@ -388,11 +537,27 @@ def generate_complaint_draft(
             body_html_parts.append(f"<li>{html.escape(r)}</li>")
         body_html_parts.append("</ul>")
 
+    if draft_warnings:
+        body_html_parts.append("<h4 style='color: #b45309; margin-top: 12px; margin-bottom: 6px;'>Warnings & Notices</h4><ul>")
+        for w in draft_warnings:
+            body_html_parts.append(f"<li>{html.escape(w)}</li>")
+        body_html_parts.append("</ul>")
+
     if payload.custom_notes:
         body_html_parts.append(f"<h4 style='color: #334155; margin-top: 12px; margin-bottom: 6px;'>Customer Notes</h4><p>{_sanitize_html(payload.custom_notes.strip())}</p>")
 
     body_html_parts.append(f"<p style='margin-top: 16px;'><strong>Requested Resolution:</strong> {html.escape(resolution_text)}.</p>")
-    body_html_parts.append("<p>Please review the attached evidence package and verification summary. I look forward to your response.</p>")
+
+    if actual_attached_filenames:
+        body_html_parts.append("<h4 style='color: #334155; margin-top: 12px; margin-bottom: 6px;'>Attached Evidence</h4><ul>")
+        for fn in actual_attached_filenames:
+            body_html_parts.append(f"<li>{html.escape(fn)}</li>")
+        body_html_parts.append("</ul>")
+        body_html_parts.append("<p>Please review the attached evidence files and confirm receipt at your earliest convenience.</p>")
+    else:
+        body_html_parts.append("<p style='margin-top: 8px; color: #64748b;'><em>Attached Evidence: None</em></p>")
+        body_html_parts.append("<p>No evidence files are attached. Please review the details above and confirm receipt at your earliest convenience.</p>")
+
     body_html_parts.append(f"<p>Sincerely,<br><strong>{html.escape(customer_name)}</strong></p>")
     body_html_parts.append("<hr style='border: 0; border-top: 1px solid #cbd5e1; margin: 16px 0;'><div style='font-size: 11px; color: #64748b;'><p><strong>Disclaimers:</strong></p><ul>")
     for d in disclaimers:
@@ -410,8 +575,10 @@ def generate_complaint_draft(
         existing_draft.requested_resolution = payload.requested_resolution.value
         existing_draft.issue_types = eligibility.issue_types
         existing_draft.confidence_summary = eligibility.confidence_values
-        existing_draft.attached_evidence_filenames = evidence_files
+        existing_draft.attached_evidence_filenames = actual_attached_filenames
         existing_draft.disclaimers = disclaimers
+        existing_draft.manual_inquiry = is_manual_inquiry
+        existing_draft.warnings = draft_warnings
         existing_draft.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing_draft)
@@ -430,8 +597,10 @@ def generate_complaint_draft(
         requested_resolution=payload.requested_resolution.value,
         issue_types=eligibility.issue_types,
         confidence_summary=eligibility.confidence_values,
-        attached_evidence_filenames=evidence_files,
+        attached_evidence_filenames=actual_attached_filenames,
         disclaimers=disclaimers,
+        manual_inquiry=is_manual_inquiry,
+        warnings=draft_warnings,
         delivery_status="draft",
         delivery_attempts=[],
         created_at=datetime.now(timezone.utc),
@@ -495,6 +664,12 @@ async def send_complaint(
     draft = get_draft(db, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail=f"Complaint draft '{draft_id}' not found.")
+
+    if not draft.recipient_email or "@" not in draft.recipient_email or "." not in draft.recipient_email.split("@", 1)[1]:
+        raise HTTPException(
+            status_code=400,
+            detail="Sending rejected: Recipient email is unresolved. Please update the draft with a confirmed recipient email before sending.",
+        )
 
     # Idempotency protection against rapid repeated button clicks
     if idempotency_key and draft.idempotency_key == idempotency_key:

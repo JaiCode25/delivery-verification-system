@@ -18,6 +18,7 @@ import pytest
 
 from app.database.models import (
     ConditionAnalysisRecord,
+    CustomerProductSubmission,
     Order,
     ProductMatchingRecord,
     QuantityVerificationRecord,
@@ -212,6 +213,16 @@ def test_complaint_draft_update_and_preview(client, seeded_db):
     seeded_db.add(session)
     seeded_db.commit()
 
+    # Add high confidence damage record to qualify for draft
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
+    seeded_db.commit()
+
     # Generate draft
     create_res = client.post(
         "/api/complaints/drafts",
@@ -243,6 +254,10 @@ def test_complaint_draft_update_and_preview(client, seeded_db):
     assert preview["subject"] == "Customized Subject Line"
     assert preview["recipient_email"] == "escalations@store.in"
     assert preview["requested_resolution"] == "missing_item_refund"
+    assert preview["eligible"] is True
+    assert preview["manual_inquiry"] is False
+    assert "damaged_item" in preview["issue_types"]
+    assert isinstance(preview["warnings"], list)
     assert len(preview["body_html"]) > 20
 
 
@@ -254,6 +269,15 @@ def test_complaint_html_sanitization_escapes_xss(client, seeded_db):
         decoded_code=order.barcode_value,
     )
     seeded_db.add(session)
+    seeded_db.commit()
+
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
     seeded_db.commit()
 
     xss_notes = "<script>alert('pwned')</script><img src=x onerror=alert(1)>"
@@ -282,6 +306,15 @@ def test_get_and_list_complaint_drafts(client, seeded_db):
     seeded_db.add(session)
     seeded_db.commit()
 
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.92},
+    )
+    seeded_db.add(cond)
+    seeded_db.commit()
+
     create_res = client.post(
         "/api/complaints/drafts",
         json={"verification_session_id": session.id},
@@ -293,6 +326,8 @@ def test_get_and_list_complaint_drafts(client, seeded_db):
     get_res = client.get(f"/api/complaints/drafts/{draft_id}")
     assert get_res.status_code == 200
     assert get_res.json()["draft_id"] == draft_id
+    assert get_res.json()["eligible"] is True
+    assert get_res.json()["manual_inquiry"] is False
 
     # List with session filter
     list_res = client.get(f"/api/complaints/drafts?verification_session_id={session.id}")
@@ -300,3 +335,251 @@ def test_get_and_list_complaint_drafts(client, seeded_db):
     items = list_res.json()
     assert len(items) >= 1
     assert items[0]["draft_id"] == draft_id
+
+
+def test_observed_case_safeguards_regression(client, seeded_db):
+    """Reproduces observed test case ec2fda8519474c0ca4b18ec5b5914b30:
+    - Customer platform: Amazon
+    - Verified order platform: Flipkart
+    - Product: match (score 0.804)
+    - Quantity: unsupported_product
+    - Condition: no_visible_damage
+    - Report ID: None
+
+    Verifies:
+    1. Eligibility is False, issue_types is empty.
+    2. POST /api/complaints/drafts is rejected with HTTP 409 by default.
+    3. 409 detail contains eligibility result, warnings, reasons, and hint.
+    4. Passing allow_manual_inquiry=True generates a non-accusatory manual inquiry draft.
+    5. Subject is 'Manual Delivery Verification Inquiry – [Product]'.
+    6. Does NOT claim damaged or incorrect merchandise.
+    7. Requests human review and phrases resolution conditionally.
+    8. Platform contradiction leaves recipient unresolved and emits warning.
+    9. Unresolved recipient blocks sending with HTTP 400.
+    10. Report is not claimed to be attached.
+    11. Disclaimers do not claim evidence audit for data integrity.
+    """
+    order = seeded_db.query(Order).first()
+    order.platform = "flipkart"
+    seeded_db.commit()
+
+    observed_session_id = "ec2fda8519474c0ca4b18ec5b5914b30"
+    session = VerificationSession(
+        id=observed_session_id,
+        order_id=order.id,
+        verification_status="verified",
+        decoded_code=order.barcode_value,
+    )
+    seeded_db.add(session)
+
+    # Customer submission specifying Amazon
+    submission = CustomerProductSubmission(
+        id=uuid4().hex,
+        verification_session_id=session.id,
+        order_id=order.id,
+        product_name="Logitech G502 HERO Gaming Mouse",
+        platform="amazon",
+        product_url="https://www.amazon.in/dp/B07GBZ4Q68",
+        normalized_product_url="https://www.amazon.in/dp/B07GBZ4Q68",
+        expected_quantity=1,
+        customer_name="Jane Doe",
+        customer_email="jane.doe@example.com",
+    )
+    seeded_db.add(submission)
+
+    # Recorded analysis signals: product match, unsupported quantity, no visible damage
+    pm = ProductMatchingRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        overall_score=0.804,
+        decision="match",
+        details={"confidence": 0.804},
+    )
+    qty = QuantityVerificationRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="unsupported_product",
+        details={"reason": "detection model unsupported"},
+    )
+    cond = ConditionAnalysisRecord(
+        verification_session_id=session.id,
+        order_id=order.id,
+        status="no_visible_damage",
+        details={"confidence": 0.95},
+    )
+    seeded_db.add_all([pm, qty, cond])
+    seeded_db.commit()
+
+    # 1. Eligibility check endpoint
+    elig_res = client.get(f"/api/complaints/eligibility/{observed_session_id}")
+    assert elig_res.status_code == 200
+    elig_data = elig_res.json()
+    assert elig_data["eligible"] is False
+    assert elig_data["issue_types"] == []
+    assert len(elig_data["warnings"]) >= 2
+
+    # 2. Rejection by default with HTTP 409
+    draft_res_409 = client.post(
+        "/api/complaints/drafts",
+        json={"verification_session_id": observed_session_id},
+    )
+    assert draft_res_409.status_code == 409
+    err_detail = draft_res_409.json()["detail"]
+    assert err_detail["eligible"] is False
+    assert err_detail["issue_types"] == []
+    assert len(err_detail["warnings"]) > 0
+    assert isinstance(err_detail["reasons"], list)
+    assert "allow_manual_inquiry=true" in err_detail["allow_manual_inquiry_hint"]
+
+    # 3. Explicit manual inquiry allowed
+    draft_res_201 = client.post(
+        "/api/complaints/drafts",
+        json={
+            "verification_session_id": observed_session_id,
+            "allow_manual_inquiry": True,
+            "requested_resolution": "replacement",
+        },
+    )
+    assert draft_res_201.status_code == 201
+    draft = draft_res_201.json()
+    draft_id = draft["draft_id"]
+
+    assert draft["eligible"] is False
+    assert draft["manual_inquiry"] is True
+    assert draft["issue_types"] == []
+    assert draft["subject"] == "Manual Delivery Verification Inquiry – Logitech G502 HERO Gaming Mouse"
+    assert "damaged or incorrect merchandise" not in draft["body_text"].lower()
+    assert "damaged or incorrect merchandise" not in draft["body_html"].lower()
+    assert "Automated package verification checks were inconclusive" in draft["body_text"]
+    assert "If an issue is confirmed after review, I request a replacement" in draft["body_text"]
+    assert "If an issue is confirmed after review" in draft["body_html"]
+
+    # Platform contradiction checks
+    assert draft["recipient_email"] == ""
+    assert any("Platform contradiction detected" in w for w in draft["warnings"])
+    assert "Customer Support Team" in draft["body_text"]
+
+    # Report and attachment checks (report_id is None, no files on disk)
+    assert draft["report_id"] is None
+    assert "- Verification Report: None generated" in draft["body_text"]
+    assert "ATTACHED EVIDENCE: None" in draft["body_text"]
+    assert "audited for data integrity" not in draft["body_text"]
+    assert "audited for data integrity" not in draft["body_html"]
+
+    # 4. Attempt to send with unresolved recipient email fails with HTTP 400
+    send_fail = client.post(
+        f"/api/complaints/drafts/{draft_id}/send",
+        json={"confirmed": True},
+    )
+    assert send_fail.status_code == 400
+    assert "Recipient email is unresolved" in send_fail.json()["detail"]
+
+    # 5. Patching verified recipient email enables transmission
+    patch_res = client.patch(
+        f"/api/complaints/drafts/{draft_id}",
+        json={"recipient_email": "support@flipkart.com"},
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["recipient_email"] == "support@flipkart.com"
+
+    send_ok = client.post(
+        f"/api/complaints/drafts/{draft_id}/send",
+        json={"confirmed": True},
+    )
+    assert send_ok.status_code == 200
+    assert send_ok.json()["delivery_status"] == "dry_run"
+
+
+def test_eligible_high_confidence_issue_drafts(client, seeded_db):
+    """Test eligible high-confidence wrong-product, quantity-mismatch, and damage drafts."""
+    order = seeded_db.query(Order).first()
+    order.platform = "flipkart"
+    seeded_db.commit()
+
+    # Case A: Wrong Product
+    session_wp = VerificationSession(
+        id=uuid4().hex,
+        order_id=order.id,
+        verification_status="verified",
+        decoded_code=order.barcode_value,
+    )
+    seeded_db.add(session_wp)
+    pm_mismatch = ProductMatchingRecord(
+        verification_session_id=session_wp.id,
+        order_id=order.id,
+        overall_score=0.10,
+        decision="mismatch",
+        details={"confidence": 0.90},
+    )
+    seeded_db.add(pm_mismatch)
+    seeded_db.commit()
+
+    res_wp = client.post(
+        "/api/complaints/drafts",
+        json={"verification_session_id": session_wp.id, "requested_resolution": "replacement"},
+    )
+    assert res_wp.status_code == 201
+    draft_wp = res_wp.json()
+    assert draft_wp["eligible"] is True
+    assert draft_wp["manual_inquiry"] is False
+    assert draft_wp["issue_types"] == ["wrong_product"]
+    assert "Incorrect product received" in draft_wp["subject"]
+    assert "Full replacement of the incorrect merchandise" in draft_wp["body_text"]
+
+    # Case B: Quantity Mismatch
+    session_qty = VerificationSession(
+        id=uuid4().hex,
+        order_id=order.id,
+        verification_status="verified",
+        decoded_code=order.barcode_value,
+    )
+    seeded_db.add(session_qty)
+    qty_mismatch = QuantityVerificationRecord(
+        verification_session_id=session_qty.id,
+        order_id=order.id,
+        status="mismatch",
+        details={"confidence": 0.88, "detected_quantity": 1, "expected_quantity": 2},
+    )
+    seeded_db.add(qty_mismatch)
+    seeded_db.commit()
+
+    res_qty = client.post(
+        "/api/complaints/drafts",
+        json={"verification_session_id": session_qty.id, "requested_resolution": "replacement"},
+    )
+    assert res_qty.status_code == 201
+    draft_qty = res_qty.json()
+    assert draft_qty["eligible"] is True
+    assert draft_qty["manual_inquiry"] is False
+    assert draft_qty["issue_types"] == ["quantity_mismatch"]
+    assert "Quantity discrepancy" in draft_qty["subject"]
+    assert "Full replacement of the affected merchandise" in draft_qty["body_text"]
+
+    # Case C: Damaged Item
+    session_dmg = VerificationSession(
+        id=uuid4().hex,
+        order_id=order.id,
+        verification_status="verified",
+        decoded_code=order.barcode_value,
+    )
+    seeded_db.add(session_dmg)
+    cond_dmg = ConditionAnalysisRecord(
+        verification_session_id=session_dmg.id,
+        order_id=order.id,
+        status="damaged",
+        details={"confidence": 0.93},
+    )
+    seeded_db.add(cond_dmg)
+    seeded_db.commit()
+
+    res_dmg = client.post(
+        "/api/complaints/drafts",
+        json={"verification_session_id": session_dmg.id, "requested_resolution": "replacement"},
+    )
+    assert res_dmg.status_code == 201
+    draft_dmg = res_dmg.json()
+    assert draft_dmg["eligible"] is True
+    assert draft_dmg["manual_inquiry"] is False
+    assert draft_dmg["issue_types"] == ["damaged_item"]
+    assert "Damaged item received" in draft_dmg["subject"]
+    assert "Full replacement of the damaged merchandise" in draft_dmg["body_text"]

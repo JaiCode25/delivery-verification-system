@@ -56,5 +56,18 @@ def init_db(target_engine=None) -> None:
                     if col_name not in existing_vs_cols:
                         conn.exec_driver_sql(sql)
                 conn.commit()
+
+            # Check complaint_drafts table for newly added columns
+            res_cd = conn.exec_driver_sql("PRAGMA table_info(complaint_drafts)").fetchall()
+            existing_cd_cols = {row[1] for row in res_cd}
+            if existing_cd_cols:
+                cd_migrations = [
+                    ("manual_inquiry", "ALTER TABLE complaint_drafts ADD COLUMN manual_inquiry BOOLEAN DEFAULT 0"),
+                    ("warnings", "ALTER TABLE complaint_drafts ADD COLUMN warnings JSON DEFAULT '[]'"),
+                ]
+                for col_name, sql in cd_migrations:
+                    if col_name not in existing_cd_cols:
+                        conn.exec_driver_sql(sql)
+                conn.commit()
     except Exception:
         pass
