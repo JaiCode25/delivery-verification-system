@@ -10,6 +10,8 @@ from app.api.reports import router as reports_router
 from app.api.verification import router as verification_router
 from app.api.quantity_verification import router as quantity_router
 from app.api.condition_analysis import router as condition_router
+from app.api.customer_submissions import router as customer_submissions_router
+from app.api.complaints import router as complaints_router
 from app.config import settings
 from app.database.connection import init_db
 from app.database.seed import seed_demonstration_orders
@@ -25,8 +27,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Delivery Verification System",
-    description="Package media analysis, barcode decoding, label OCR, hybrid product matching, and verification reports.",
-    version="1.3.0",
+    description="Package media analysis, barcode decoding, label OCR, hybrid product matching, customer intake, and complaint assistant.",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -45,6 +47,8 @@ app.include_router(product_matching_router)
 app.include_router(reports_router)
 app.include_router(quantity_router)
 app.include_router(condition_router)
+app.include_router(customer_submissions_router)
+app.include_router(complaints_router)
 
 
 @app.get("/")

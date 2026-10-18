@@ -17,6 +17,8 @@ from app.database.models import (
     VerificationSession,
     QuantityVerificationRecord,
     ConditionAnalysisRecord,
+    CustomerProductSubmission,
+    ComplaintDraft,
 )
 from app.schemas.enums import (
     LabelVerificationStatus,
@@ -444,6 +446,50 @@ HTML_REPORT_TEMPLATE = """
             <p>Internal, electrical and functional condition are not assessed.</p>
         </div>
 
+        <!-- Customer Product Intake & Reference -->
+        {% if customer_product_name or product_url %}
+        <div class="card">
+            <div class="card-title">Customer Product Intake & Reference</div>
+            <div class="grid">
+                <div class="field">
+                    <span class="field-label">Customer Specified Product</span>
+                    <span class="field-value">{{ customer_product_name or 'N/A' }}</span>
+                </div>
+                <div class="field">
+                    <span class="field-label">Product URL</span>
+                    <span class="field-value">{{ product_url or 'N/A' }}</span>
+                </div>
+                <div class="field">
+                    <span class="field-label">Reference Source</span>
+                    <span class="field-value">{{ reference_source or 'reference_unavailable' }}</span>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Complaint Assistant Status -->
+        <div class="card">
+            <div class="card-title">Complaint Assistant Status</div>
+            <p><strong>Recommendation:</strong> {{ 'Eligible for Complaint' if complaint_eligible else 'Not Recommended' }}</p>
+            {% if complaint_reasons %}
+            <ul style="margin-left: 20px; margin-top: 6px;">
+                {% for r in complaint_reasons %}
+                <li>{{ r }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+            <div class="grid" style="margin-top: 12px;">
+                <div class="field">
+                    <span class="field-label">Complaint Draft</span>
+                    <span class="field-value">{{ complaint_draft_status or 'Not Generated' }}</span>
+                </div>
+                <div class="field">
+                    <span class="field-label">Email Delivery</span>
+                    <span class="field-value">{{ email_delivery_status or 'Not Attempted' }}</span>
+                </div>
+            </div>
+        </div>
+
         <!-- Evidence & Media Metadata -->
         <div class="card">
             <div class="card-title">Media & Audit Trail</div>
@@ -530,7 +576,21 @@ def generate_verification_report(
     quantity_result = _read_optional_analysis(quantity_record, QuantityVerificationResult)
     condition_result = _read_optional_analysis(condition_record, ConditionAnalysisResult)
 
-    # 4. Mask Customer PII
+    # 4. Fetch customer product submission & complaint draft
+    cust_submission = (
+        db.query(CustomerProductSubmission)
+        .filter(CustomerProductSubmission.verification_session_id == session_id)
+        .order_by(CustomerProductSubmission.created_at.desc())
+        .first()
+    )
+    complaint_draft = (
+        db.query(ComplaintDraft)
+        .filter(ComplaintDraft.verification_session_id == session_id)
+        .order_by(ComplaintDraft.created_at.desc())
+        .first()
+    )
+
+    # 5. Mask Customer PII
     masked_name = mask_name(order.customer_name if order else None)
     masked_email = mask_email(order.customer_email if order else None)
     masked_addr = mask_address(order.delivery_address if order else None)
@@ -626,6 +686,18 @@ def generate_verification_report(
             evidence_files.extend(f.frame_filename for f in analysis.supporting_frames)
             relevant_timestamps.extend(f.timestamp_seconds for f in analysis.supporting_frames)
 
+    # Determine Customer Intake & Reference fields
+    cust_product_name = cust_submission.product_name if cust_submission else None
+    prod_url = cust_submission.product_url if cust_submission else (order.items[0].product_url if (order and order.items) else None)
+    ref_source: Optional[str] = None
+    if cust_submission and cust_submission.resolution_metadata:
+        ref_source = cust_submission.resolution_metadata.get("reference_source")
+    elif pm_result and pm_result.best_reference_id:
+        ref_source = "demo_catalogue"
+
+    from app.services.complaint_service import check_complaint_eligibility
+    complaint_elig = check_complaint_eligibility(db, session_id)
+
     report_read = VerificationReportRead(
         report_id=report_id,
         verification_session_id=session_id,
@@ -646,6 +718,13 @@ def generate_verification_report(
         quantity_verification=quantity_result,
         condition_analysis=condition_result,
         channel_statuses=channel_statuses,
+        customer_product_name=cust_product_name,
+        product_url=prod_url,
+        reference_source=ref_source,
+        complaint_eligible=complaint_elig.eligible,
+        complaint_reasons=complaint_elig.reasons,
+        complaint_draft_status=complaint_draft.delivery_status if complaint_draft else None,
+        email_delivery_status=complaint_draft.delivery_status if (complaint_draft and complaint_draft.delivery_status in ("sent", "dry_run", "failed")) else None,
         final_decision=final_dec,
         decision_explanation=explanation,
         warnings=all_warnings,

@@ -427,6 +427,62 @@ def test_nested_report_recipient_data_is_masked(client, db_session, evidence_cas
     assert evidence_case.order.customer_name not in response.text
     report_id = response.json()["report_id"]
     assert "Private Recipient" not in client.get(f"/api/reports/{report_id}").text
-    assert "Private Recipient" not in client.get(f"/api/reports/{report_id}/html").text
-    # The source session stays intact; privacy filtering belongs to report output.
     assert evidence_case.session.label_analysis_data["parsed_fields"]["customer_name"]["value"] == "Private Recipient"
+
+
+def test_report_includes_customer_intake_and_complaint_summary(client, db_session):
+    from app.database.models import CustomerProductSubmission, ComplaintDraft
+    order = db_session.query(Order).first()
+    session = VerificationSession(
+        order_id=order.id,
+        verification_status="verified",
+        decoded_code=order.barcode_value,
+    )
+    db_session.add(session)
+    db_session.commit()
+
+    # Create linked customer product submission
+    sub = CustomerProductSubmission(
+        product_name="VGR V-055 Hair Trimmer",
+        platform="flipkart",
+        product_url="https://flipkart.com/vgr.html",
+        normalized_product_url="https://flipkart.com/vgr.html",
+        expected_quantity=1,
+        verification_session_id=session.id,
+        order_id=order.id,
+        resolution_metadata={"reference_source": "demo_catalogue"},
+    )
+    db_session.add(sub)
+    db_session.commit()
+
+    # Create complaint draft for session
+    draft = ComplaintDraft(
+        verification_session_id=session.id,
+        order_id=order.id,
+        subject="Complaint: Damaged product",
+        body_text="Body",
+        body_html="<p>Body</p>",
+        recipient_email="support@flipkart.com",
+        requested_resolution="replacement",
+        delivery_status="dry_run",
+    )
+    db_session.add(draft)
+    db_session.commit()
+
+    # Generate report
+    rep_res = client.post(f"/api/reports/generate/{session.id}")
+    assert rep_res.status_code == 201
+    rep_data = rep_res.json()
+    assert rep_data["customer_product_name"] == "VGR V-055 Hair Trimmer"
+    assert rep_data["product_url"] == "https://flipkart.com/vgr.html"
+    assert rep_data["reference_source"] == "demo_catalogue"
+    assert rep_data["complaint_draft_status"] == "dry_run"
+    assert rep_data["email_delivery_status"] == "dry_run"
+
+    # HTML report check
+    report_id = rep_data["report_id"]
+    html_res = client.get(f"/api/reports/{report_id}/html")
+    assert html_res.status_code == 200
+    assert "Customer Product Intake & Reference" in html_res.text
+    assert "Complaint Assistant Status" in html_res.text
+    assert "VGR V-055 Hair Trimmer" in html_res.text

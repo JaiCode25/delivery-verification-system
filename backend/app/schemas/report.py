@@ -48,6 +48,17 @@ class VerificationReportRead(BaseModel):
     condition_analysis: Optional[ConditionAnalysisResult] = None
     channel_statuses: Dict[str, str] = Field(default_factory=dict)
 
+    # Customer Intake & Reference Information
+    customer_product_name: Optional[str] = None
+    product_url: Optional[str] = None
+    reference_source: Optional[str] = None
+
+    # Complaint Assistant Information
+    complaint_eligible: Optional[bool] = None
+    complaint_reasons: List[str] = []
+    complaint_draft_status: Optional[str] = None
+    email_delivery_status: Optional[str] = None
+
     # Overall Synthesis
     final_decision: OverallVerificationDecision
     decision_explanation: str

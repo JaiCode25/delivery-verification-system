@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -169,3 +170,71 @@ class QuantityVerificationRecord(EvidenceAnalysisColumns, Base):
 
 class ConditionAnalysisRecord(EvidenceAnalysisColumns, Base):
     __tablename__ = "condition_analysis_records"
+
+
+class CustomerProductSubmission(Base):
+    __tablename__ = "customer_product_submissions"
+
+    id = Column(String(36), primary_key=True, default=lambda: uuid4().hex, index=True)
+    product_name = Column(String(255), nullable=False)
+    platform = Column(String(50), nullable=False, index=True)
+    product_url = Column(Text, nullable=False)
+    normalized_product_url = Column(Text, nullable=False)
+    expected_quantity = Column(Integer, nullable=False, default=1)
+    colour_or_variant = Column(String(100), nullable=True)
+    customer_name = Column(String(200), nullable=True)
+    customer_email = Column(String(200), nullable=True)
+    notes = Column(Text, nullable=True)
+    verification_session_id = Column(String(36), ForeignKey("verification_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    resolved_reference_id = Column(String(36), ForeignKey("product_references.id", ondelete="SET NULL"), nullable=True)
+    resolution_metadata = Column(JSON, nullable=True)
+    contradictions = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    verification_session = relationship("VerificationSession", backref="customer_submissions")
+    order = relationship("Order", backref="customer_submissions")
+    product_reference = relationship("ProductReference")
+
+    @property
+    def submission_id(self) -> str:
+        return self.id
+
+    @property
+    def resolved_reference(self) -> Optional[dict]:
+        return self.resolution_metadata
+
+
+class ComplaintDraft(Base):
+    __tablename__ = "complaint_drafts"
+
+    id = Column(String(36), primary_key=True, default=lambda: uuid4().hex, index=True)
+    submission_id = Column(String(36), ForeignKey("customer_product_submissions.id", ondelete="SET NULL"), nullable=True, index=True)
+    verification_session_id = Column(String(36), ForeignKey("verification_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    report_id = Column(String(36), ForeignKey("verification_reports.id", ondelete="SET NULL"), nullable=True, index=True)
+    subject = Column(String(255), nullable=False)
+    body_text = Column(Text, nullable=False)
+    body_html = Column(Text, nullable=False)
+    recipient_email = Column(String(200), nullable=False)
+    requested_resolution = Column(String(50), nullable=False, default="replacement")
+    issue_types = Column(JSON, nullable=False, default=list)
+    confidence_summary = Column(JSON, nullable=False, default=dict)
+    attached_evidence_filenames = Column(JSON, nullable=False, default=list)
+    disclaimers = Column(JSON, nullable=False, default=list)
+    delivery_status = Column(String(50), nullable=False, default="draft", index=True)
+    delivery_attempts = Column(JSON, nullable=False, default=list)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    idempotency_key = Column(String(100), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    submission = relationship("CustomerProductSubmission", backref="complaint_drafts")
+    verification_session = relationship("VerificationSession", backref="complaint_drafts")
+    order = relationship("Order", backref="complaint_drafts")
+    report = relationship("VerificationReport", backref="complaint_drafts")
+
+    @property
+    def draft_id(self) -> str:
+        return self.id

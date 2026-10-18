@@ -13,6 +13,7 @@ httpx==0.28.1
 pytest==9.1.1
 ImageHash==4.3.2
 Jinja2==3.1.6
+fastapi-mail==1.4.2
 
 # Optional inference adapters (weights are separately cached; no Torch upgrade required).
 ultralytics==8.3.200

@@ -3,7 +3,9 @@
 Quantity verification and visible-condition analysis are documented in
 [the backend evidence guide](docs/quantity-condition.md), including model provenance,
 offline defaults, APIs, report decisions, limitations and Swagger retest steps.
-The current report rules in that guide extend the earlier Phase 3 summary below.
+Customer product intake and automated complaint assistant flows are documented in
+[the customer intake & complaint assistant guide](docs/customer-intake-complaints.md).
+The current report rules extend the earlier Phase 3 summary below.
 
 This FastAPI backend serves as the core intelligence and verification engine for the Delivery Verification and Automated Complaint System. It accepts package images and unboxing videos, extracts frames with timecodes and sharpness scoring, detects barcodes/QR codes, reads label text via OCR, extracts structured shipping-label metadata, executes hybrid visual product matching against stored reference images, and generates structured verification reports in JSON and responsive HTML to authenticate deliveries and prevent fraudulent claims.
 
@@ -22,6 +24,8 @@ The backend is built in Python 3.11 with FastAPI and SQLAlchemy (SQLite):
   * `product_matching.py`: Visual matching endpoint (`POST /api/product-matching/analyze`) comparing delivered product images/videos against stored reference images.
   * `reports.py`: Report generation endpoints (`POST /api/reports/generate/{session_id}`, `GET /api/reports/{report_id}`, `GET /api/reports/{report_id}/html`).
   * `verification.py`: Dedicated verification endpoints evaluating barcodes, structured shipping labels, and managing complaint/claim lifecycles.
+  * `customer_submissions.py`: Customer product intake endpoints (`POST /api/customer/submissions`, `GET /api/customer/submissions/{submission_id}`, `PATCH /api/customer/submissions/{submission_id}`, `POST /api/customer/submissions/{submission_id}/link-session`).
+  * `complaints.py`: Automated complaint assistant endpoints (`GET /api/complaints/eligibility/{session_id}`, `POST /api/complaints/drafts`, `GET /api/complaints/drafts`, `GET /api/complaints/drafts/{draft_id}`, `PATCH /api/complaints/drafts/{draft_id}`, `GET /api/complaints/drafts/{draft_id}/preview`, `POST /api/complaints/drafts/{draft_id}/send`).
 * **Service Layer (`app/services/`):**
   * `reference_service.py`: Secure storage and lifecycle management for order reference images under `storage/references/<order_id>/` (1–5 images per item, MIME validation, path traversal prevention, safe UUIDs).
   * `image_similarity.py`: Multi-signal explainable similarity algorithms (perceptual hashing via `imagehash`, normalized OpenCV HSV color histograms, OpenCV ORB visual feature matching with Lowe's ratio test, and optional lazy-loaded OpenCLIP adapter).

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Literal, Set
+from typing import Dict, List, Literal, Optional, Set
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
@@ -73,6 +73,36 @@ class Settings(BaseSettings):
     # Preserve uploads and supporting frames; optionally remove only unselected
     # frames created by the current quantity/condition request.
     retain_unselected_evidence_frames: bool = True
+
+    # Customer Product Intake & URL metadata settings
+    enable_url_metadata_extraction: bool = False
+    url_metadata_allowed_domains: List[str] = [
+        "amazon.in",
+        "amazon.com",
+        "flipkart.com",
+        "blinkit.com",
+    ]
+    url_metadata_timeout_seconds: float = 5.0
+    url_metadata_max_size_bytes: int = 1024 * 1024  # 1 MB
+
+    # Complaint Assistant & Email Delivery settings
+    complaint_confidence_threshold: float = Field(0.80, ge=0.0, le=1.0)
+    complaint_email_enabled: bool = False
+    complaint_email_provider: Literal["dry_run", "smtp"] = "dry_run"
+    complaint_email_from: str = "support@delivery-verification.example.com"
+    complaint_smtp_host: str = "localhost"
+    complaint_smtp_port: int = 587
+    complaint_smtp_username: Optional[str] = None
+    complaint_smtp_password: Optional[str] = None
+    complaint_smtp_starttls: bool = True
+    complaint_max_attachment_mb: int = 10
+    platform_support_emails: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "amazon": "cs-reply@amazon.in",
+            "flipkart": "support@flipkart.com",
+            "blinkit": "info@blinkit.com",
+        }
+    )
 
 
 settings = Settings()
